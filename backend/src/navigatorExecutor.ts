@@ -14,6 +14,10 @@ type ExecutableStep = {
   value?: string;
 };
 
+function stripAnsi(input: string): string {
+  return input.replace(/\u001b\[[0-9;]*m/g, '');
+}
+
 function buildMockResult(actionPlan: NavigatorAction[]): ExecutionResult {
   const steps = actionPlan.map((action) => ({
     action: action.action,
@@ -81,7 +85,8 @@ async function executeWithPlaywright(
           note: `Executed ${step.action} on ${step.target}`,
         });
       } catch (error: any) {
-        const failNote = `Failed ${step.action} on ${step.target}: ${error?.message || 'unknown error'}`;
+        const rawMessage = String(error?.message || 'unknown error');
+        const failNote = `Failed ${step.action} on ${step.target}: ${stripAnsi(rawMessage)}`;
         steps.push({
           action: step.action,
           target: step.target,

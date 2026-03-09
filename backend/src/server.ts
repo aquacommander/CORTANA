@@ -9,6 +9,7 @@ import {
   StoryOutput,
   WorkflowStage,
 } from '../../frontend/shared/contracts.ts';
+import { analyzeNavigatorTarget } from './navigatorAnalyzer.ts';
 import { executeNavigatorPlan } from './navigatorExecutor.ts';
 import { SessionStore } from './sessionStore.ts';
 import {
@@ -210,20 +211,11 @@ app.post('/api/navigator/analyze', async (req, res) => {
     moveStage(session, 'NAVIGATOR_ANALYSIS');
     appendLog(session, 'Stage advanced to NAVIGATOR_ANALYSIS');
 
-    const navigatorPlan: NavigatorPlan = {
-      detectedElements: [
-        { name: 'Title input', selectorHint: '#title', confidence: 0.92 },
-        { name: 'Description input', selectorHint: '#description', confidence: 0.87 },
-        { name: 'Publish button', selectorHint: 'button[type="submit"]', confidence: 0.9 },
-      ],
-      actionPlan: [
-        { action: 'click', target: '#title', confidence: 0.92, reason: 'Focus title field' },
-        { action: 'type', target: '#title', value: session.storyOutput?.title || session.goal, confidence: 0.91, reason: 'Set title' },
-        { action: 'click', target: 'button[type="submit"]', confidence: 0.9, reason: 'Publish story' },
-      ],
-      confidence: 0.89,
-      notes: 'MVP deterministic plan from latest screenshot.',
-    };
+    const navigatorPlan: NavigatorPlan = await analyzeNavigatorTarget({
+      targetUrl,
+      storyTitle: session.storyOutput?.title || `Story for "${session.goal}"`,
+      goal: session.goal,
+    });
 
     session.navigatorPlan = navigatorPlan;
     appendLog(session, `Navigator screenshot received (${screenshotBase64.length} chars)`);
