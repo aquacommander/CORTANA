@@ -19,12 +19,21 @@ function normalizeTone(value: string): string {
   return value;
 }
 
+function normalizePlatform(value: string): string {
+  if (value === 'ig') return 'instagram';
+  if (value === 'twitter') return 'x';
+  return value;
+}
+
+function extractLabeledValue(message: string, label: string): string | undefined {
+  const regex = new RegExp(`${label}\\s*(?:is|:)?\\s*([a-zA-Z0-9\\s_-]{2,80})`, 'i');
+  const match = message.match(regex);
+  return match?.[1]?.trim();
+}
+
 function extractObjective(message: string, fallbackGoal: string): string {
   const trimmed = message.trim();
-  const lower = trimmed.toLowerCase();
-  const looksLikeCommand =
-    lower.includes('generate') || lower.includes('go ahead') || lower.includes('continue');
-  if (trimmed.length > 5 && !looksLikeCommand) return trimmed;
+  if (trimmed.length > 5) return trimmed;
   return fallbackGoal;
 }
 
@@ -32,7 +41,7 @@ function nextFollowUp(intent: LiveIntent): string {
   if (!intent.audience) return 'Who is the primary audience for this campaign?';
   if (!intent.tone) return 'What tone should I use (playful, cinematic, professional, etc.)?';
   if (!intent.platform) return 'Which platform should we optimize for (instagram, youtube, tiktok, linkedin, web)?';
-  return 'Great, I have enough details. Say "generate story" to continue.';
+  return 'Great, I have enough details. I can hand off to Storyteller now.';
 }
 
 export function processLiveMessage(params: {
@@ -44,19 +53,19 @@ export function processLiveMessage(params: {
   const previous = params.previousIntent;
   const lower = message.toLowerCase();
 
-  const audience = extractHint(message, AUDIENCE_HINTS) || previous?.audience || '';
-  const tone = normalizeTone(extractHint(message, TONE_HINTS) || previous?.tone || '');
-  const platform = extractHint(message, PLATFORM_HINTS) || previous?.platform || '';
-  const objective = previous?.objective || extractObjective(message, params.goal);
+  const extractedAudience = extractLabeledValue(message, 'audience') || extractHint(message, AUDIENCE_HINTS);
+  const extractedTone = extractLabeledValue(message, 'tone') || extractHint(message, TONE_HINTS);
+  const extractedPlatform =
+    extractLabeledValue(message, 'platform') || extractHint(message, [...PLATFORM_HINTS, 'ig', 'twitter']);
+
+  const audience = extractedAudience || previous?.audience || '';
+  const tone = normalizeTone(extractedTone || previous?.tone || '');
+  const platform = normalizePlatform(extractedPlatform || previous?.platform || '');
+  const objective = extractLabeledValue(message, 'objective') || previous?.objective || extractObjective(message, params.goal);
   const intentValue =
     lower.includes('publish') || lower.includes('post') ? 'publish_story' : previous?.intent || 'create_story';
 
-  const hasExplicitGenerateRequest =
-    lower.includes('generate') || lower.includes('go ahead') || lower.includes('continue');
-  const hasAllRequiredFields = Boolean(objective && audience && tone && platform);
-  const readyForStoryGeneration =
-    Boolean(previous?.readyForStoryGeneration) ||
-    (hasAllRequiredFields && (hasExplicitGenerateRequest || !previous));
+  const readyForStoryGeneration = Boolean(objective && audience && tone && platform);
 
   const liveIntent: LiveIntent = {
     intent: intentValue,
