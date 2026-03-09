@@ -84,6 +84,8 @@ export function processLiveMessage(params: {
   message: string;
   goal: string;
   previousIntent?: LiveIntent;
+  knowledgeContext?: string;
+  screenshotBase64?: string;
 }): Promise<LiveAgentResult> {
   return processLiveMessageInternal(params);
 }
@@ -92,6 +94,8 @@ async function processLiveMessageInternal(params: {
   message: string;
   goal: string;
   previousIntent?: LiveIntent;
+  knowledgeContext?: string;
+  screenshotBase64?: string;
 }): Promise<LiveAgentResult> {
   const message = params.message.trim();
   const previous = params.previousIntent;
@@ -129,21 +133,38 @@ async function processLiveMessageInternal(params: {
     const extractionPrompt = `
 You are an intake agent for a creative campaign system.
 Extract intent fields from user message and previous state.
+Also produce a concise assistant response tailored to the user's needs and interests.
 Return ONLY JSON with keys:
-intent, objective, audience, tone, platform, confidence
+intent, objective, audience, tone, platform, needs, interests, unresolvedQuestions, assistantResponse, confidence
 
 Allowed intent values: create_story, publish_story
 If a field is unknown, return empty string.
+needs/interests/unresolvedQuestions should be arrays of short strings.
 
 Goal: ${params.goal}
 Previous state: ${JSON.stringify(previous || {})}
 User message: ${message}
+Knowledge context:
+${params.knowledgeContext || 'No external context provided.'}
 `;
 
     try {
+      const parts: any[] = [];
+      if (params.screenshotBase64) {
+        parts.push({
+          inlineData: {
+            data: params.screenshotBase64.replace(/^data:.*;base64,/, ''),
+            mimeType: 'image/png',
+          },
+        });
+        parts.push({
+          text: 'Analyze this visual context and include any useful intent clues in extraction.',
+        });
+      }
+      parts.push({ text: extractionPrompt });
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: extractionPrompt,
+        contents: { parts },
       });
       const parsed = tryParseJson(response.text || '{}');
       if (parsed) {
@@ -151,6 +172,15 @@ User message: ${message}
         const audience = String(parsed.audience || previous?.audience || '').trim();
         const tone = normalizeTone(String(parsed.tone || previous?.tone || '').trim().toLowerCase());
         const platform = normalizePlatform(String(parsed.platform || previous?.platform || '').trim().toLowerCase());
+        const needs = Array.isArray(parsed.needs)
+          ? parsed.needs.map((item: unknown) => String(item).trim()).filter(Boolean)
+          : previous?.needs || [];
+        const interests = Array.isArray(parsed.interests)
+          ? parsed.interests.map((item: unknown) => String(item).trim()).filter(Boolean)
+          : previous?.interests || [];
+        const unresolvedQuestions = Array.isArray(parsed.unresolvedQuestions)
+          ? parsed.unresolvedQuestions.map((item: unknown) => String(item).trim()).filter(Boolean)
+          : previous?.unresolvedQuestions || [];
         const intentValue =
           String(parsed.intent || '').trim() === 'publish_story' || lower.includes('publish') || lower.includes('post')
             ? 'publish_story'
@@ -164,6 +194,9 @@ User message: ${message}
           audience,
           tone,
           platform,
+          needs,
+          interests,
+          unresolvedQuestions,
           readyForStoryGeneration,
           handoffTo: readyForStoryGeneration ? 'storyteller' : 'none',
           missingFields,
@@ -177,8 +210,9 @@ User message: ${message}
         return {
           liveIntent,
           reply: readyForStoryGeneration
-            ? `Perfect - I captured your intent for ${platform}. I can hand off to Storyteller now.`
-            : nextFollowUp(liveIntent),
+            ? String(parsed.assistantResponse || '').trim() ||
+              `Perfect - I captured your intent for ${platform}. I can hand off to Storyteller now.`
+            : `${String(parsed.assistantResponse || '').trim() || 'Thanks for sharing.'} ${nextFollowUp(liveIntent)}`,
         };
       }
     } catch {
@@ -195,6 +229,8 @@ User message: ${message}
   const tone = normalizeTone(extractedTone || previous?.tone || '');
   const platform = normalizePlatform(extractedPlatform || previous?.platform || '');
   const objective = extractLabeledValue(message, 'objective') || previous?.objective || extractObjective(message, params.goal);
+  const extractedNeed = extractLabeledValue(message, 'need');
+  const extractedInterest = extractLabeledValue(message, 'interest');
   const intentValue =
     lower.includes('publish') || lower.includes('post') ? 'publish_story' : previous?.intent || 'create_story';
 
@@ -207,6 +243,11 @@ User message: ${message}
     audience: audience || '',
     tone: tone || '',
     platform: platform || '',
+    needs: extractedNeed ? [extractedNeed] : previous?.needs || [],
+    interests: extractedInterest ? [extractedInterest] : previous?.interests || [],
+    unresolvedQuestions: message.includes('?')
+      ? [message]
+      : previous?.unresolvedQuestions || [],
     readyForStoryGeneration,
     handoffTo: readyForStoryGeneration ? 'storyteller' : 'none',
     missingFields,
