@@ -33,6 +33,11 @@ export const apiClient = {
 
   getSession: (sessionId: string) => request<{ session: Session }>(`/session/${sessionId}`),
 
+  restartSessionFromReview: (sessionId: string) =>
+    request<{ session: Session }>(`/session/${sessionId}/restart-from-review`, {
+      method: 'POST',
+    }),
+
   sendLiveMessage: (payload: { sessionId: string; message: string }) =>
     request<{ liveIntent: LiveIntent; reply: string }>('/live/message', {
       method: 'POST',

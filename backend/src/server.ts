@@ -24,6 +24,10 @@ import {
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
 const store = new SessionStore();
+const allowedHosts = (process.env.NAVIGATOR_ALLOWED_HOSTS || '')
+  .split(',')
+  .map((host) => host.trim().toLowerCase())
+  .filter(Boolean);
 
 const STAGE_ORDER: WorkflowStage[] = [
   'INTAKE',
@@ -77,6 +81,20 @@ function ensureStage(session: Session, target: WorkflowStage) {
   }
 }
 
+function resolveHost(urlValue: string): string {
+  return new URL(urlValue).hostname.toLowerCase();
+}
+
+function assertTargetUrlAllowed(urlValue: string) {
+  if (allowedHosts.length === 0) return;
+  const host = resolveHost(urlValue);
+  if (!allowedHosts.includes(host)) {
+    throw new Error(
+      `Target host "${host}" is not allowed. Configure NAVIGATOR_ALLOWED_HOSTS with approved hosts.`,
+    );
+  }
+}
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', sessions: store.size });
 });
@@ -122,6 +140,25 @@ app.get('/api/session', (_req, res) => {
     updatedAt: session.updatedAt,
   }));
   return res.json({ sessions });
+});
+
+app.post('/api/session/:sessionId/restart-from-review', async (req, res) => {
+  try {
+    const session = getSessionOrThrow(req.params.sessionId);
+    if (!session.storyOutput) {
+      return res.status(400).json({ error: 'Cannot restart session without story output' });
+    }
+
+    session.workflowStage = 'STORY_REVIEW';
+    session.status = 'active';
+    session.navigatorPlan = undefined;
+    session.executionResult = undefined;
+    appendLog(session, 'Session restarted from STORY_REVIEW');
+    await store.set(session);
+    return res.json({ session });
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Unable to restart session' });
+  }
 });
 
 app.post('/api/live/message', async (req, res) => {
@@ -205,6 +242,9 @@ app.post('/api/navigator/analyze', async (req, res) => {
       return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
     const { sessionId, screenshotBase64, targetUrl } = parsed.data;
+    if (targetUrl) {
+      assertTargetUrlAllowed(targetUrl);
+    }
 
     const session = getSessionOrThrow(sessionId);
     ensureStage(session, 'STORY_REVIEW');
@@ -246,6 +286,12 @@ app.post('/api/navigator/execute', async (req, res) => {
 
     const selectedMode = mode || (process.env.NAVIGATOR_MODE === 'playwright' ? 'playwright' : 'mock');
     const selectedTarget = targetUrl || session.navigatorTargetUrl || process.env.NAVIGATOR_TARGET_URL;
+    if (selectedMode === 'playwright') {
+      if (!selectedTarget) {
+        return res.status(400).json({ error: 'Playwright mode requires targetUrl' });
+      }
+      assertTargetUrlAllowed(selectedTarget);
+    }
     const executionResult: ExecutionResult = await executeNavigatorPlan(session.navigatorPlan, {
       mode: selectedMode,
       targetUrl: selectedTarget,
