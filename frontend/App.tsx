@@ -10,7 +10,7 @@ import { generateTextImage, generateTextVideo, generateStyleSuggestion } from '.
 import { apiClient } from './services/apiClient';
 import { getRandomStyle, fileToBase64, TYPOGRAPHY_SUGGESTIONS, createGifFromVideo } from './utils';
 import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck } from 'lucide-react';
-import { WorkflowStage } from './shared/contracts';
+import { Session, WorkflowStage } from './shared/contracts';
 import { WORKFLOW_STAGES } from './shared/workflow';
 
 interface Video {
@@ -251,6 +251,11 @@ const App: React.FC = () => {
   const [showKeyDialog, setShowKeyDialog] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [workflowStageOverride, setWorkflowStageOverride] = useState<WorkflowStage | null>(null);
+  const [sessionLookupId, setSessionLookupId] = useState<string>("");
+  const [loadedSession, setLoadedSession] = useState<Session | null>(null);
+  const [isLoadingSession, setIsLoadingSession] = useState<boolean>(false);
+  const [navigatorTargetUrl, setNavigatorTargetUrl] = useState<string>("");
+  const [navigatorMode, setNavigatorMode] = useState<'mock' | 'playwright'>('mock');
 
   const [inputText, setInputText] = useState<string>("");
   const [inputStyle, setInputStyle] = useState<string>("");
@@ -312,6 +317,26 @@ const App: React.FC = () => {
     } else {
       setViewMode('create');
       window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const handleLoadSession = async () => {
+    const id = sessionLookupId.trim();
+    if (!id) return;
+    setIsLoadingSession(true);
+    try {
+      const { session } = await apiClient.getSession(id);
+      setLoadedSession(session);
+      setSessionId(session.sessionId);
+      setWorkflowStageOverride(session.workflowStage);
+      setStatusMessage(`Loaded session: ${session.status}`);
+      setNavigatorTargetUrl(session.navigatorTargetUrl || "");
+      setViewMode('create');
+    } catch (error: any) {
+      setStatusMessage(error.message || 'Unable to load session');
+      setLoadedSession(null);
+    } finally {
+      setIsLoadingSession(false);
     }
   };
 
@@ -379,10 +404,24 @@ const App: React.FC = () => {
 
       if (activeSessionId) {
         try {
-          await apiClient.analyzeNavigator({ sessionId: activeSessionId, screenshotBase64: b64Image });
+          await apiClient.analyzeNavigator({
+            sessionId: activeSessionId,
+            screenshotBase64: b64Image,
+            targetUrl: navigatorTargetUrl.trim() || undefined,
+          });
           setWorkflowStageOverride('NAVIGATOR_ANALYSIS');
-          await apiClient.executeNavigator({ sessionId: activeSessionId });
+          const { executionResult } = await apiClient.executeNavigator({
+            sessionId: activeSessionId,
+            mode: navigatorMode,
+            targetUrl: navigatorTargetUrl.trim() || undefined,
+            headless: true,
+          });
           setWorkflowStageOverride('COMPLETION');
+          if (executionResult.status !== 'success') {
+            setStatusMessage(`Execution finished with status: ${executionResult.status}`);
+          }
+          const { session } = await apiClient.getSession(activeSessionId);
+          setLoadedSession(session);
         } catch (backendError) {
           console.warn('Failed to sync navigator workflow stages.', backendError);
         }
@@ -408,6 +447,7 @@ const App: React.FC = () => {
     setIsGifGenerating(false);
     setSessionId(null);
     setWorkflowStageOverride(null);
+    setLoadedSession(null);
   };
 
   const handleDownload = () => {
@@ -510,6 +550,50 @@ const App: React.FC = () => {
         </div>
 
         <form onSubmit={startProcess} className="space-y-6">
+          <div className="rounded-xl border border-stone-200 dark:border-zinc-800 bg-stone-50 dark:bg-zinc-900 p-4 space-y-3">
+            <p className="text-xs font-bold uppercase tracking-wide text-stone-500 dark:text-zinc-400">Session Controls</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <input
+                type="text"
+                value={sessionLookupId}
+                onChange={(e) => setSessionLookupId(e.target.value)}
+                placeholder="Paste existing session ID"
+                className="md:col-span-2 w-full bg-white dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm text-stone-900 dark:text-white"
+              />
+              <button
+                type="button"
+                onClick={handleLoadSession}
+                disabled={!sessionLookupId.trim() || isLoadingSession}
+                className="px-4 py-2 rounded-lg border border-stone-300 dark:border-zinc-700 text-sm font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isLoadingSession ? <Loader2 size={14} className="animate-spin" /> : null}
+                Load Session
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <input
+                type="url"
+                value={navigatorTargetUrl}
+                onChange={(e) => setNavigatorTargetUrl(e.target.value)}
+                placeholder="Navigator target URL (for playwright mode)"
+                className="w-full bg-white dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm text-stone-900 dark:text-white"
+              />
+              <select
+                value={navigatorMode}
+                onChange={(e) => setNavigatorMode(e.target.value as 'mock' | 'playwright')}
+                className="w-full bg-white dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm text-stone-900 dark:text-white"
+              >
+                <option value="mock">Navigator Mode: mock</option>
+                <option value="playwright">Navigator Mode: playwright</option>
+              </select>
+            </div>
+            {loadedSession && (
+              <p className="text-xs text-stone-600 dark:text-zinc-300">
+                Loaded {loadedSession.sessionId} | stage: {loadedSession.workflowStage} | status: {loadedSession.status} | logs: {loadedSession.logs.length}
+              </p>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-5">
               <div className="space-y-2">
