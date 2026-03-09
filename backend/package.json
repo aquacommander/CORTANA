@@ -8,6 +8,7 @@
     "start": "node --enable-source-maps src/server.ts"
   },
   "dependencies": {
+    "@google/genai": "^1.32.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "playwright": "^1.54.2",

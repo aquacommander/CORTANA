@@ -17,6 +17,8 @@ export const liveMessageSchema = z.object({
 
 export const generateStorySchema = z.object({
   sessionId: requiredString('sessionId', 120),
+  imageUrl: z.string().trim().url('imageUrl must be a valid URL').optional(),
+  videoUrl: z.string().trim().url('videoUrl must be a valid URL').optional(),
 });
 
 export const navigatorAnalyzeSchema = z.object({
