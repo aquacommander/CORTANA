@@ -10,6 +10,7 @@ This folder contains the workflow/session backend used by the frontend.
 - `GET /api/session/:sessionId`
 - `POST /api/session/:sessionId/restart-from-review`
 - `POST /api/live/message`
+- `POST /api/live/message-stream`
 - `POST /api/story/generate`
 - `POST /api/story/regenerate-block`
 - `POST /api/navigator/analyze`
@@ -39,6 +40,8 @@ Optional safety guardrail:
 
 - `POST /api/live/message` now runs a follow-up intake loop and only marks
   `readyForStoryGeneration=true` after objective/audience/tone/platform are captured.
+- `POST /api/live/message-stream` returns a near-live NDJSON stream with incremental
+  reply chunks (`delta`) and a final structured payload (`final` with `liveIntent` + `reply`).
 - `POST /api/story/generate` requires a ready live intent and returns a full
   mixed-media `StoryOutput` (summary, script, image block, video block,
   narration, caption, CTA).

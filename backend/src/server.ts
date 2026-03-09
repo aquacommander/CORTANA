@@ -96,6 +96,30 @@ function assertTargetUrlAllowed(urlValue: string) {
   }
 }
 
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function processAndPersistLiveMessage(sessionId: string, message: string) {
+  const session = getSessionOrThrow(sessionId);
+  const { liveIntent, reply } = await processLiveMessage({
+    message,
+    goal: session.goal,
+    previousIntent: session.liveIntent,
+  });
+
+  session.liveIntent = liveIntent;
+  session.conversationSummary = `${session.conversationSummary} | User: ${message}`;
+  appendLog(session, 'Live message received and intent updated');
+
+  if (liveIntent.readyForStoryGeneration && session.workflowStage === 'INTAKE') {
+    moveStage(session, 'STORY_GENERATION');
+    appendLog(session, 'Stage advanced to STORY_GENERATION');
+  }
+  await store.set(session);
+  return { liveIntent, reply };
+}
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', sessions: store.size });
 });
@@ -169,23 +193,7 @@ app.post('/api/live/message', async (req, res) => {
       return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
     const { sessionId, message } = parsed.data;
-
-    const session = getSessionOrThrow(sessionId);
-    const { liveIntent, reply } = await processLiveMessage({
-      message,
-      goal: session.goal,
-      previousIntent: session.liveIntent,
-    });
-
-    session.liveIntent = liveIntent;
-    session.conversationSummary = `${session.conversationSummary} | User: ${message}`;
-    appendLog(session, 'Live message received and intent updated');
-
-    if (liveIntent.readyForStoryGeneration && session.workflowStage === 'INTAKE') {
-      moveStage(session, 'STORY_GENERATION');
-      appendLog(session, 'Stage advanced to STORY_GENERATION');
-    }
-    await store.set(session);
+    const { liveIntent, reply } = await processAndPersistLiveMessage(sessionId, message);
 
     return res.json({
       liveIntent,
@@ -193,6 +201,32 @@ app.post('/api/live/message', async (req, res) => {
     });
   } catch (error: any) {
     return res.status(400).json({ error: error.message || 'Unable to process live message' });
+  }
+});
+
+app.post('/api/live/message-stream', async (req, res) => {
+  try {
+    const parsed = liveMessageSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
+    }
+    const { sessionId, message } = parsed.data;
+    const { liveIntent, reply } = await processAndPersistLiveMessage(sessionId, message);
+
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+
+    const words = reply.split(/\s+/).filter(Boolean);
+    for (let i = 0; i < words.length; i += 1) {
+      const chunk = `${words[i]}${i < words.length - 1 ? ' ' : ''}`;
+      res.write(`${JSON.stringify({ type: 'delta', delta: chunk })}\n`);
+      await sleep(45);
+    }
+    res.write(`${JSON.stringify({ type: 'final', liveIntent, reply })}\n`);
+    return res.end();
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Unable to stream live message' });
   }
 });
 

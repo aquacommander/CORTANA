@@ -59,6 +59,65 @@ export const apiClient = {
       signal: options?.signal,
     }),
 
+  sendLiveMessageStream: async (
+    payload: { sessionId: string; message: string },
+    handlers: {
+      onDelta: (chunk: string) => void;
+      signal?: AbortSignal;
+    },
+  ): Promise<{ liveIntent: LiveIntent; reply: string }> => {
+    const response = await fetch(`${API_BASE}/live/message-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: handlers.signal,
+    });
+    if (!response.ok || !response.body) {
+      let details = '';
+      try {
+        details = await response.text();
+      } catch {
+        details = response.statusText;
+      }
+      throw new Error(`API ${response.status}: ${details || 'Request failed'}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalPayload: { liveIntent: LiveIntent; reply: string } | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        let parsed: any;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (parsed.type === 'delta' && typeof parsed.delta === 'string') {
+          handlers.onDelta(parsed.delta);
+        }
+        if (parsed.type === 'final' && parsed.liveIntent && typeof parsed.reply === 'string') {
+          finalPayload = { liveIntent: parsed.liveIntent as LiveIntent, reply: parsed.reply };
+        }
+      }
+    }
+
+    if (!finalPayload) {
+      throw new Error('Stream ended without final payload');
+    }
+    return finalPayload;
+  },
+
   generateStory: (payload: {
     sessionId: string;
     text?: string;

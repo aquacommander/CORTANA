@@ -10,7 +10,7 @@ import { generateTextImage, generateTextVideo, generateStyleSuggestion } from '.
 import { apiClient } from './services/apiClient';
 import { getRandomStyle, fileToBase64, TYPOGRAPHY_SUGGESTIONS, createGifFromVideo } from './utils';
 import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck } from 'lucide-react';
-import { Session, WorkflowStage } from './shared/contracts';
+import { LiveIntent, Session, WorkflowStage } from './shared/contracts';
 import { WORKFLOW_STAGES } from './shared/workflow';
 
 interface Video {
@@ -276,6 +276,8 @@ const App: React.FC = () => {
   const [isSendingIntake, setIsSendingIntake] = useState<boolean>(false);
   const [isListeningIntake, setIsListeningIntake] = useState<boolean>(false);
   const [isAgentTyping, setIsAgentTyping] = useState<boolean>(false);
+  const [useStreamingReplies, setUseStreamingReplies] = useState<boolean>(true);
+  const [speakAgentReplies, setSpeakAgentReplies] = useState<boolean>(false);
   const [isRegeneratingBlock, setIsRegeneratingBlock] = useState<boolean>(false);
 
   const [inputText, setInputText] = useState<string>("");
@@ -478,19 +480,64 @@ const App: React.FC = () => {
         setSessionId(session.sessionId);
         setSessionLookupId(session.sessionId);
       }
-      const response = await apiClient.sendLiveMessage({
-        sessionId: activeSessionId,
-        message,
-      }, {
-        signal: controller.signal,
-      });
       setIntakeTranscript((prev) => [
         ...prev,
         { role: 'user', content: message },
-        { role: 'assistant', content: response.reply },
+        { role: 'assistant', content: '' },
       ]);
       setIntakeMessage("");
+      const updateLatestAssistantMessage = (content: string) => {
+        setIntakeTranscript((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].role === 'assistant') {
+              next[i] = { ...next[i], content };
+              break;
+            }
+          }
+          return next;
+        });
+      };
+
+      let response: { liveIntent: LiveIntent; reply: string };
+      if (useStreamingReplies) {
+        let aggregateReply = '';
+        response = await apiClient.sendLiveMessageStream(
+          { sessionId: activeSessionId, message },
+          {
+            signal: controller.signal,
+            onDelta: (chunk) => {
+              aggregateReply += chunk;
+              updateLatestAssistantMessage(aggregateReply);
+            },
+          },
+        );
+      } else {
+        response = await apiClient.sendLiveMessage(
+          {
+            sessionId: activeSessionId,
+            message,
+          },
+          {
+            signal: controller.signal,
+          },
+        );
+        updateLatestAssistantMessage(response.reply);
+      }
+
       setStatusMessage(response.reply);
+      if (speakAgentReplies && 'speechSynthesis' in window) {
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(response.reply);
+          utterance.rate = 1;
+          utterance.pitch = 1;
+          window.speechSynthesis.speak(utterance);
+        } catch {
+          // ignore speech synthesis errors
+        }
+      }
+
       if (response.liveIntent.readyForStoryGeneration) {
         setWorkflowStageOverride('STORY_GENERATION');
       } else {
@@ -501,6 +548,16 @@ const App: React.FC = () => {
       await handleRefreshSessionList();
     } catch (error: any) {
       if (error?.name === 'AbortError') {
+        setIntakeTranscript((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].role === 'assistant' && !next[i].content) {
+              next[i] = { ...next[i], content: '[Interrupted]' };
+              break;
+            }
+          }
+          return next;
+        });
         setStatusMessage('Previous intake request interrupted.');
       } else {
         setStatusMessage(error.message || 'Unable to send intake message');
@@ -932,6 +989,20 @@ const App: React.FC = () => {
                   className="px-3 py-1.5 rounded-lg border border-amber-300 text-amber-700 dark:border-amber-700 dark:text-amber-300 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-900/20 disabled:opacity-50"
                 >
                   Interrupt Agent
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUseStreamingReplies((prev) => !prev)}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800"
+                >
+                  {useStreamingReplies ? 'Streaming: On' : 'Streaming: Off'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSpeakAgentReplies((prev) => !prev)}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800"
+                >
+                  {speakAgentReplies ? 'Agent Voice: On' : 'Agent Voice: Off'}
                 </button>
                 {loadedSession?.liveIntent?.missingFields && loadedSession.liveIntent.missingFields.length > 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
