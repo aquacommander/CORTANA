@@ -275,6 +275,7 @@ const App: React.FC = () => {
   const [intakeTranscript, setIntakeTranscript] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   const [isSendingIntake, setIsSendingIntake] = useState<boolean>(false);
   const [isListeningIntake, setIsListeningIntake] = useState<boolean>(false);
+  const [isAgentTyping, setIsAgentTyping] = useState<boolean>(false);
   const [isRegeneratingBlock, setIsRegeneratingBlock] = useState<boolean>(false);
 
   const [inputText, setInputText] = useState<string>("");
@@ -294,6 +295,8 @@ const App: React.FC = () => {
     : getWorkflowViewState(viewMode, state);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const intakeAbortRef = useRef<AbortController | null>(null);
+  const intakeRecognitionRef = useRef<any>(null);
 
   useEffect(() => {
     if (state === AppState.GENERATING_IMAGE || state === AppState.GENERATING_VIDEO || state === AppState.PLAYING) {
@@ -318,6 +321,19 @@ const App: React.FC = () => {
     };
     loadRecentSessions();
   }, [viewMode]);
+
+  useEffect(() => {
+    return () => {
+      intakeAbortRef.current?.abort();
+      if (intakeRecognitionRef.current) {
+        try {
+          intakeRecognitionRef.current.stop();
+        } catch {
+          // ignore stop errors on unmount
+        }
+      }
+    };
+  }, []);
 
   const handleSelectKey = async () => {
     if (hasConfiguredApiKey()) {
@@ -450,6 +466,10 @@ const App: React.FC = () => {
     const message = intakeMessage.trim();
     if (!message) return;
     setIsSendingIntake(true);
+    setIsAgentTyping(true);
+    intakeAbortRef.current?.abort();
+    const controller = new AbortController();
+    intakeAbortRef.current = controller;
     try {
       let activeSessionId = sessionId;
       if (!activeSessionId) {
@@ -461,6 +481,8 @@ const App: React.FC = () => {
       const response = await apiClient.sendLiveMessage({
         sessionId: activeSessionId,
         message,
+      }, {
+        signal: controller.signal,
       });
       setIntakeTranscript((prev) => [
         ...prev,
@@ -478,10 +500,25 @@ const App: React.FC = () => {
       setSessionLookupId(session.sessionId);
       await handleRefreshSessionList();
     } catch (error: any) {
-      setStatusMessage(error.message || 'Unable to send intake message');
+      if (error?.name === 'AbortError') {
+        setStatusMessage('Previous intake request interrupted.');
+      } else {
+        setStatusMessage(error.message || 'Unable to send intake message');
+      }
     } finally {
+      if (intakeAbortRef.current === controller) {
+        intakeAbortRef.current = null;
+      }
+      setIsAgentTyping(false);
       setIsSendingIntake(false);
     }
+  };
+
+  const handleInterruptIntake = () => {
+    intakeAbortRef.current?.abort();
+    setIsSendingIntake(false);
+    setIsAgentTyping(false);
+    setStatusMessage('Intake interrupted. You can send a new message now.');
   };
 
   const handleStartListening = () => {
@@ -492,14 +529,28 @@ const App: React.FC = () => {
       return;
     }
 
+    if (intakeRecognitionRef.current) {
+      try {
+        intakeRecognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
+      intakeRecognitionRef.current = null;
+    }
+
     const recognition = new SpeechRecognitionImpl();
     recognition.lang = 'en-US';
-    recognition.interimResults = false;
+    recognition.interimResults = true;
+    recognition.continuous = true;
     recognition.maxAlternatives = 1;
     setIsListeningIntake(true);
+    intakeRecognitionRef.current = recognition;
 
     recognition.onresult = (event: any) => {
-      const transcript = event.results?.[0]?.[0]?.transcript || '';
+      const transcript = Array.from(event.results || [])
+        .map((result: any) => result?.[0]?.transcript || '')
+        .join(' ')
+        .trim();
       if (transcript) setIntakeMessage(transcript);
     };
     recognition.onerror = () => {
@@ -508,9 +559,24 @@ const App: React.FC = () => {
     };
     recognition.onend = () => {
       setIsListeningIntake(false);
+      if (intakeRecognitionRef.current === recognition) {
+        intakeRecognitionRef.current = null;
+      }
     };
 
     recognition.start();
+  };
+
+  const handleStopListening = () => {
+    if (!intakeRecognitionRef.current) return;
+    try {
+      intakeRecognitionRef.current.stop();
+    } catch {
+      // ignore stop errors
+    } finally {
+      intakeRecognitionRef.current = null;
+      setIsListeningIntake(false);
+    }
   };
 
   const handleRegenerateStoryBlock = async (
@@ -812,12 +878,23 @@ const App: React.FC = () => {
                     <span className="font-semibold">{msg.role === 'user' ? 'You:' : 'Agent:'}</span> {msg.content}
                   </p>
                 ))}
+                {isAgentTyping && (
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">
+                    <span className="font-semibold">Agent:</span> typing...
+                  </p>
+                )}
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
                 <input
                   type="text"
                   value={intakeMessage}
                   onChange={(e) => setIntakeMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendIntakeMessage();
+                    }
+                  }}
                   placeholder="Tell the live agent your campaign objective..."
                   className="md:col-span-3 w-full bg-white dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm text-stone-900 dark:text-white"
                 />
@@ -839,6 +916,22 @@ const App: React.FC = () => {
                   className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
                 >
                   {isListeningIntake ? 'Listening...' : 'Use Mic (optional)'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStopListening}
+                  disabled={!isListeningIntake}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Stop Mic
+                </button>
+                <button
+                  type="button"
+                  onClick={handleInterruptIntake}
+                  disabled={!isSendingIntake}
+                  className="px-3 py-1.5 rounded-lg border border-amber-300 text-amber-700 dark:border-amber-700 dark:text-amber-300 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-900/20 disabled:opacity-50"
+                >
+                  Interrupt Agent
                 </button>
                 {loadedSession?.liveIntent?.missingFields && loadedSession.liveIntent.missingFields.length > 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
