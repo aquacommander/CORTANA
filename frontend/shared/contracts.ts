@@ -70,6 +70,7 @@ export interface Session {
   goal: string;
   status: SessionStatus;
   workflowStage: WorkflowStage;
+  navigatorTargetUrl?: string;
   conversationSummary: string;
   liveIntent?: LiveIntent;
   storyOutput?: StoryOutput;

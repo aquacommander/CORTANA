@@ -11,5 +11,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "../shared/contracts.ts"]
+  "include": ["src/**/*.ts", "../frontend/shared/contracts.ts"]
 }

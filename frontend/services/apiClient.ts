@@ -45,13 +45,13 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
 
-  analyzeNavigator: (payload: { sessionId: string; screenshotBase64: string }) =>
+  analyzeNavigator: (payload: { sessionId: string; screenshotBase64: string; targetUrl?: string }) =>
     request<{ navigatorPlan: NavigatorPlan }>('/navigator/analyze', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
 
-  executeNavigator: (payload: { sessionId: string }) =>
+  executeNavigator: (payload: { sessionId: string; mode?: 'mock' | 'playwright'; targetUrl?: string; headless?: boolean }) =>
     request<{ executionResult: ExecutionResult }>('/navigator/execute', {
       method: 'POST',
       body: JSON.stringify(payload),

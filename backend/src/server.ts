@@ -8,10 +8,21 @@ import {
   Session,
   StoryOutput,
   WorkflowStage,
-} from '../../shared/contracts.ts';
+} from '../../frontend/shared/contracts.ts';
+import { executeNavigatorPlan } from './navigatorExecutor.ts';
+import { SessionStore } from './sessionStore.ts';
+import {
+  createSessionSchema,
+  generateStorySchema,
+  getZodErrorMessage,
+  liveMessageSchema,
+  navigatorAnalyzeSchema,
+  navigatorExecuteSchema,
+} from './validators.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
+const store = new SessionStore();
 
 const STAGE_ORDER: WorkflowStage[] = [
   'INTAKE',
@@ -22,8 +33,6 @@ const STAGE_ORDER: WorkflowStage[] = [
   'COMPLETION',
 ];
 
-const sessions = new Map<string, Session>();
-
 app.use(cors({ origin: ['http://localhost:3000'], credentials: false }));
 app.use(express.json({ limit: '10mb' }));
 
@@ -32,7 +41,7 @@ function nowIso() {
 }
 
 function getSessionOrThrow(sessionId: string): Session {
-  const session = sessions.get(sessionId);
+  const session = store.get(sessionId);
   if (!session) {
     throw new Error(`Session not found: ${sessionId}`);
   }
@@ -68,14 +77,15 @@ function ensureStage(session: Session, target: WorkflowStage) {
 }
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', sessions: sessions.size });
+  res.json({ status: 'ok', sessions: store.size });
 });
 
-app.post('/api/session/create', (req, res) => {
-  const goal = String(req.body?.goal || '').trim();
-  if (!goal) {
-    return res.status(400).json({ error: 'Goal is required' });
+app.post('/api/session/create', async (req, res) => {
+  const parsed = createSessionSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
   }
+  const { goal } = parsed.data;
 
   const timestamp = nowIso();
   const session: Session = {
@@ -89,7 +99,7 @@ app.post('/api/session/create', (req, res) => {
     updatedAt: timestamp,
   };
 
-  sessions.set(session.sessionId, session);
+  await store.set(session);
   return res.json({ session });
 });
 
@@ -102,13 +112,24 @@ app.get('/api/session/:sessionId', (req, res) => {
   }
 });
 
-app.post('/api/live/message', (req, res) => {
+app.get('/api/session', (_req, res) => {
+  const sessions = store.getAll().map((session) => ({
+    sessionId: session.sessionId,
+    goal: session.goal,
+    status: session.status,
+    workflowStage: session.workflowStage,
+    updatedAt: session.updatedAt,
+  }));
+  return res.json({ sessions });
+});
+
+app.post('/api/live/message', async (req, res) => {
   try {
-    const sessionId = String(req.body?.sessionId || '').trim();
-    const message = String(req.body?.message || '').trim();
-    if (!sessionId || !message) {
-      return res.status(400).json({ error: 'sessionId and message are required' });
+    const parsed = liveMessageSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
+    const { sessionId, message } = parsed.data;
 
     const session = getSessionOrThrow(sessionId);
     const lowerMessage = message.toLowerCase();
@@ -131,6 +152,7 @@ app.post('/api/live/message', (req, res) => {
       moveStage(session, 'STORY_GENERATION');
       appendLog(session, 'Stage advanced to STORY_GENERATION');
     }
+    await store.set(session);
 
     return res.json({
       liveIntent,
@@ -141,12 +163,13 @@ app.post('/api/live/message', (req, res) => {
   }
 });
 
-app.post('/api/story/generate', (req, res) => {
+app.post('/api/story/generate', async (req, res) => {
   try {
-    const sessionId = String(req.body?.sessionId || '').trim();
-    if (!sessionId) {
-      return res.status(400).json({ error: 'sessionId is required' });
+    const parsed = generateStorySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
+    const { sessionId } = parsed.data;
     const session = getSessionOrThrow(sessionId);
 
     ensureStage(session, 'STORY_GENERATION');
@@ -166,6 +189,7 @@ app.post('/api/story/generate', (req, res) => {
     appendLog(session, 'Story output generated');
     moveStage(session, 'STORY_REVIEW');
     appendLog(session, 'Stage advanced to STORY_REVIEW');
+    await store.set(session);
 
     return res.json({ storyOutput });
   } catch (error: any) {
@@ -173,16 +197,13 @@ app.post('/api/story/generate', (req, res) => {
   }
 });
 
-app.post('/api/navigator/analyze', (req, res) => {
+app.post('/api/navigator/analyze', async (req, res) => {
   try {
-    const sessionId = String(req.body?.sessionId || '').trim();
-    const screenshotBase64 = String(req.body?.screenshotBase64 || '').trim();
-    if (!sessionId) {
-      return res.status(400).json({ error: 'sessionId is required' });
+    const parsed = navigatorAnalyzeSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
-    if (!screenshotBase64) {
-      return res.status(400).json({ error: 'screenshotBase64 is required' });
-    }
+    const { sessionId, screenshotBase64, targetUrl } = parsed.data;
 
     const session = getSessionOrThrow(sessionId);
     ensureStage(session, 'STORY_REVIEW');
@@ -205,48 +226,46 @@ app.post('/api/navigator/analyze', (req, res) => {
     };
 
     session.navigatorPlan = navigatorPlan;
+    appendLog(session, `Navigator screenshot received (${screenshotBase64.length} chars)`);
+    if (targetUrl) {
+      session.navigatorTargetUrl = targetUrl;
+      appendLog(session, `Navigator target URL set to ${targetUrl}`);
+    }
     appendLog(session, 'Navigator analysis generated');
+    await store.set(session);
     return res.json({ navigatorPlan });
   } catch (error: any) {
     return res.status(400).json({ error: error.message || 'Unable to analyze navigator input' });
   }
 });
 
-app.post('/api/navigator/execute', (req, res) => {
+app.post('/api/navigator/execute', async (req, res) => {
   try {
-    const sessionId = String(req.body?.sessionId || '').trim();
-    if (!sessionId) {
-      return res.status(400).json({ error: 'sessionId is required' });
+    const parsed = navigatorExecuteSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
+    const { sessionId, targetUrl, mode, headless } = parsed.data;
 
     const session = getSessionOrThrow(sessionId);
     ensureStage(session, 'NAVIGATOR_ANALYSIS');
     moveStage(session, 'NAVIGATOR_EXECUTION');
     appendLog(session, 'Stage advanced to NAVIGATOR_EXECUTION');
 
-    const steps = (session.navigatorPlan?.actionPlan || []).map((action) => ({
-      action: action.action,
-      target: action.target,
-      status: 'success' as const,
-      note: `Executed ${action.action} on ${action.target}`,
-    }));
-
-    const executionResult: ExecutionResult = {
-      status: 'success',
-      steps,
-      logs: [
-        'Navigator execution started',
-        ...steps.map((step) => step.note || ''),
-        'Navigator execution finished',
-      ],
-      completedActions: steps.length,
-    };
+    const selectedMode = mode || (process.env.NAVIGATOR_MODE === 'playwright' ? 'playwright' : 'mock');
+    const selectedTarget = targetUrl || session.navigatorTargetUrl || process.env.NAVIGATOR_TARGET_URL;
+    const executionResult: ExecutionResult = await executeNavigatorPlan(session.navigatorPlan, {
+      mode: selectedMode,
+      targetUrl: selectedTarget,
+      headless: headless ?? true,
+    });
 
     session.executionResult = executionResult;
-    appendLog(session, 'Navigator actions executed');
+    appendLog(session, `Navigator actions executed (${selectedMode} mode)`);
     moveStage(session, 'COMPLETION');
-    session.status = 'completed';
+    session.status = executionResult.status === 'failed' ? 'failed' : 'completed';
     appendLog(session, 'Stage advanced to COMPLETION and session marked completed');
+    await store.set(session);
 
     return res.json({ executionResult });
   } catch (error: any) {
@@ -254,6 +273,15 @@ app.post('/api/navigator/execute', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend server listening on http://localhost:${PORT}`);
+async function startServer() {
+  await store.initialize();
+  app.listen(PORT, () => {
+    console.log(`Backend server listening on http://localhost:${PORT}`);
+    console.log(`Loaded sessions: ${store.size}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error('Failed to start backend:', error);
+  process.exit(1);
 });
