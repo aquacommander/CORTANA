@@ -5,10 +5,12 @@
 
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { AppState } from './types';
+import { AppState, WorkflowViewState } from './types';
 import { generateTextImage, generateTextVideo, generateStyleSuggestion } from './services/geminiService';
 import { getRandomStyle, fileToBase64, TYPOGRAPHY_SUGGESTIONS, createGifFromVideo } from './utils';
 import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck } from 'lucide-react';
+import { WorkflowStage } from './shared/contracts';
+import { WORKFLOW_STAGES } from './shared/workflow';
 
 interface Video {
   id: string;
@@ -38,6 +40,35 @@ const hasAnyUsableApiKey = async (): Promise<boolean> => {
     return Boolean(await bridge.hasSelectedApiKey());
   }
   return false;
+};
+
+const WORKFLOW_STAGE_PROGRESS: Record<WorkflowStage, number> = {
+  INTAKE: 16,
+  STORY_GENERATION: 38,
+  STORY_REVIEW: 55,
+  NAVIGATOR_ANALYSIS: 72,
+  NAVIGATOR_EXECUTION: 88,
+  COMPLETION: 100,
+};
+
+const getWorkflowViewState = (viewMode: 'gallery' | 'create', appState: AppState): WorkflowViewState => {
+  if (viewMode === 'gallery') {
+    return { stage: 'INTAKE', progressPercent: WORKFLOW_STAGE_PROGRESS.INTAKE };
+  }
+
+  if (appState === AppState.GENERATING_IMAGE || appState === AppState.GENERATING_VIDEO) {
+    return { stage: 'STORY_GENERATION', progressPercent: WORKFLOW_STAGE_PROGRESS.STORY_GENERATION };
+  }
+
+  if (appState === AppState.PLAYING) {
+    return { stage: 'STORY_REVIEW', progressPercent: WORKFLOW_STAGE_PROGRESS.STORY_REVIEW };
+  }
+
+  if (appState === AppState.ERROR) {
+    return { stage: 'STORY_GENERATION', progressPercent: WORKFLOW_STAGE_PROGRESS.STORY_GENERATION };
+  }
+
+  return { stage: 'STORY_GENERATION', progressPercent: WORKFLOW_STAGE_PROGRESS.STORY_GENERATION };
 };
 
 export const MOCK_VIDEOS: Video[] = [
@@ -180,6 +211,39 @@ const HeroCarousel: React.FC<{ forceMute: boolean }> = ({ forceMute }) => {
   );
 };
 
+const WorkflowProgress: React.FC<{ activeStage: WorkflowStage; progressPercent: number }> = ({ activeStage, progressPercent }) => {
+  return (
+    <div className="w-full max-w-7xl px-4 lg:px-6 pt-4">
+      <div className="bg-white/90 dark:bg-zinc-900/90 border border-stone-200 dark:border-zinc-800 rounded-2xl p-4 shadow-sm">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs font-bold uppercase tracking-wider text-stone-500 dark:text-zinc-400">Unified Agent Workflow</p>
+          <p className="text-xs font-semibold text-stone-600 dark:text-zinc-300">{progressPercent}%</p>
+        </div>
+        <div className="w-full h-2 bg-stone-100 dark:bg-zinc-800 rounded-full overflow-hidden">
+          <div className="h-full bg-stone-900 dark:bg-stone-100 transition-all duration-700" style={{ width: `${progressPercent}%` }} />
+        </div>
+        <div className="mt-3 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+          {WORKFLOW_STAGES.map((stage) => {
+            const isActive = stage.id === activeStage;
+            return (
+              <div
+                key={stage.id}
+                className={`rounded-lg border px-2.5 py-2 text-[11px] leading-tight transition-colors ${
+                  isActive
+                    ? 'border-stone-900 dark:border-stone-200 bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900'
+                    : 'border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-800 text-stone-500 dark:text-zinc-400'
+                }`}
+              >
+                {stage.label}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
   const [viewMode, setViewMode] = useState<'gallery' | 'create'>('gallery');
@@ -197,6 +261,7 @@ const App: React.FC = () => {
   const [isSuggestingStyle, setIsSuggestingStyle] = useState<boolean>(false);
   const hasEnvKey = hasConfiguredApiKey();
   const canUseAiStudio = !hasEnvKey && Boolean(getAiStudioBridge()?.openSelectKey && getAiStudioBridge()?.hasSelectedApiKey);
+  const workflowViewState = getWorkflowViewState(viewMode, state);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -499,7 +564,10 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen w-full flex flex-col bg-stone-50 dark:bg-zinc-950 text-stone-900 dark:text-stone-100 font-sans transition-colors duration-500 overflow-x-hidden selection:bg-stone-900 selection:text-white dark:selection:bg-white dark:selection:text-stone-900">
       <ApiKeyDialog isOpen={showKeyDialog} onClose={() => setShowKeyDialog(false)} onSelect={handleSelectKey} canUseAiStudio={canUseAiStudio} hasEnvKey={hasEnvKey} />
-      
+      <div className="w-full flex justify-center">
+        <WorkflowProgress activeStage={workflowViewState.stage} progressPercent={workflowViewState.progressPercent} />
+      </div>
+
       <div className="flex-1 flex items-center justify-center p-4 lg:p-6 overflow-hidden">
         <div className={`transition-all duration-1000 ease-[cubic-bezier(0.25,0.8,0.25,1)] w-full flex flex-col lg:flex-row items-center justify-center ${isFlip ? 'max-w-6xl gap-0 lg:gap-0' : 'max-w-7xl gap-8 lg:gap-16'}`}>
           <div className={`flex flex-col justify-center space-y-6 lg:space-y-8 z-10 text-center lg:text-left transition-all duration-1000 ease-[cubic-bezier(0.25,0.8,0.25,1)] origin-center overflow-hidden flex-shrink-0 ${isFlip ? 'max-h-0 opacity-0 -translate-y-24 lg:max-h-[900px] lg:w-0 lg:-translate-y-0 lg:-translate-x-32' : 'max-h-[1000px] opacity-100 translate-y-0 lg:w-5/12 lg:translate-x-0'}`}>

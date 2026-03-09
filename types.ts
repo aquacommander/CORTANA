@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 
+import { WorkflowStage } from './shared/contracts';
+
 export enum AppState {
   IDLE = 'IDLE',
   CHECKING_KEY = 'CHECKING_KEY',
@@ -15,4 +17,9 @@ export enum AppState {
 export interface GenerationResult {
   imageUrl?: string;
   videoUrl?: string;
+}
+
+export interface WorkflowViewState {
+  stage: WorkflowStage;
+  progressPercent: number;
 }
