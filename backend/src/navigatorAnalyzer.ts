@@ -13,6 +13,7 @@ type AnalyzeNavigatorOptions = {
     cta?: string;
     imageAssetUrl?: string;
     videoAssetUrl?: string;
+    platform?: string;
   };
 };
 
@@ -20,6 +21,7 @@ type SelectorHints = {
   titleInput?: string;
   descriptionInput?: string;
   captionInput?: string;
+  tagsInput?: string;
   fileInput?: string;
   submitButton?: string;
 };
@@ -28,6 +30,7 @@ const FALLBACK_SELECTORS: SelectorHints = {
   titleInput: '#title',
   descriptionInput: '#description',
   captionInput: '#caption',
+  tagsInput: '#tags',
   fileInput: 'input[type="file"]',
   submitButton: 'button[type="submit"]',
 };
@@ -48,6 +51,7 @@ function buildPlanFromSelectors(
     titleValue: string;
     descriptionValue?: string;
     captionValue?: string;
+    tagsValue?: string;
     imageAssetUrl?: string;
   },
   notes: string,
@@ -128,6 +132,29 @@ function buildPlanFromSelectors(
         value: values.imageAssetUrl,
         confidence: clamp(confidence - 0.05),
         reason: 'Upload generated campaign image asset',
+      });
+    }
+  }
+
+  if (selectors.tagsInput) {
+    detectedElements.push({
+      name: 'Tags input',
+      selectorHint: selectors.tagsInput,
+      confidence: clamp(confidence - 0.04),
+    });
+    if (values.tagsValue) {
+      actionPlan.push({
+        action: 'click',
+        target: selectors.tagsInput,
+        confidence: clamp(confidence - 0.04),
+        reason: 'Focus tags field',
+      });
+      actionPlan.push({
+        action: 'type',
+        target: selectors.tagsInput,
+        value: values.tagsValue,
+        confidence: clamp(confidence - 0.05),
+        reason: 'Set hashtags/tags from story context',
       });
     }
   }
@@ -337,10 +364,18 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
         'input[id*="image" i]',
         'input[name*="upload" i]',
       ];
+      const tagsCandidates = [
+        '#tags',
+        'input[name="tags"]',
+        'input[id*="tags"]',
+        'textarea[name="tags"]',
+        'input[placeholder*="tag" i]',
+      ];
 
       let titleInput: string | null = null;
       let descriptionInput: string | null = null;
       let captionInput: string | null = null;
+      let tagsInput: string | null = null;
       let fileInput: string | null = null;
       let submitButton: string | null = null;
 
@@ -399,7 +434,18 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
         }
       }
 
-      return { titleInput, descriptionInput, captionInput, fileInput, submitButton };
+      for (const selector of tagsCandidates) {
+        try {
+          if (document.querySelector(selector)) {
+            tagsInput = selector;
+            break;
+          }
+        } catch {
+          // Ignore invalid selectors in browser context.
+        }
+      }
+
+      return { titleInput, descriptionInput, captionInput, tagsInput, fileInput, submitButton };
     });
 
     if (!selectors.titleInput && !selectors.submitButton) {
@@ -410,6 +456,7 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
       titleInput: selectors.titleInput || undefined,
       descriptionInput: selectors.descriptionInput || undefined,
       captionInput: selectors.captionInput || undefined,
+      tagsInput: selectors.tagsInput || undefined,
       fileInput: selectors.fileInput || undefined,
       submitButton: selectors.submitButton || undefined,
     };
@@ -427,6 +474,7 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
   const captionValue = [options.storyContext?.caption, options.storyContext?.cta]
     .filter(Boolean)
     .join('\n');
+  const tagsValue = derivePlatformTags(options.storyContext?.caption || '', options.storyContext?.platform);
   const maybeTargetUrl = options.targetUrl?.trim();
 
   const recordingPlan = await analyzeFromScreenRecordingWithGemini(options);
@@ -452,6 +500,7 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
         titleValue,
         descriptionValue,
         captionValue,
+        tagsValue,
         imageAssetUrl: options.storyContext?.imageAssetUrl,
       },
       'No target URL provided. Using fallback deterministic selector plan.',
@@ -468,6 +517,7 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
           titleValue,
           descriptionValue,
           captionValue,
+          tagsValue,
           imageAssetUrl: options.storyContext?.imageAssetUrl,
         },
         `Target URL analyzed (${maybeTargetUrl}), but required elements were not detected. Using fallback plan.`,
@@ -481,6 +531,7 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
         titleValue,
         descriptionValue,
         captionValue,
+        tagsValue,
         imageAssetUrl: options.storyContext?.imageAssetUrl,
       },
       `Selector plan generated from live page analysis: ${maybeTargetUrl}`,
@@ -493,10 +544,29 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
         titleValue,
         descriptionValue,
         captionValue,
+        tagsValue,
         imageAssetUrl: options.storyContext?.imageAssetUrl,
       },
       `Live page analysis failed (${summarizeError(error)}). Using fallback plan.`,
       0.7,
     );
   }
+}
+
+function derivePlatformTags(caption: string, platform?: string): string {
+  const words = caption
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length >= 4)
+    .slice(0, 3);
+  const normalizedPlatform = (platform || '').toLowerCase().trim();
+  const platformTag =
+    normalizedPlatform === 'instagram' ? 'instagram' :
+    normalizedPlatform === 'youtube' ? 'youtube' :
+    normalizedPlatform === 'tiktok' ? 'tiktok' :
+    normalizedPlatform === 'linkedin' ? 'linkedin' :
+    'campaign';
+  const tags = [`#${platformTag}`, ...words.map((word) => `#${word}`)];
+  return tags.join(' ');
 }
