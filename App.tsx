@@ -67,7 +67,7 @@ export const MOCK_VIDEOS: Video[] = [
   },
 ];
 
-const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: () => void; canUseAiStudio: boolean }> = ({ isOpen, onClose, onSelect, canUseAiStudio }) => {
+const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: () => void; canUseAiStudio: boolean; hasEnvKey: boolean }> = ({ isOpen, onClose, onSelect, canUseAiStudio, hasEnvKey }) => {
   if (!isOpen) return null;
 
   return (
@@ -89,7 +89,8 @@ const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: (
               <div className="text-xs text-stone-500 dark:text-stone-400 space-y-2">
                 <p>• Make sure your project is linked to a valid billing account.</p>
                 <p>• Check the <a href="https://ai.google.dev/pricing" target="_blank" rel="noopener noreferrer" className="underline">pricing documentation</a> for more details.</p>
-                {!canUseAiStudio && <p>• Set `GEMINI_API_KEY` in `.env.local` and restart the app.</p>}
+                <p>• Set `GEMINI_API_KEY` in `.env.local` and restart the app.</p>
+                {hasEnvKey && <p>• Environment key detected. You can close this dialog and continue.</p>}
               </div>
             </div>
           </div>
@@ -105,7 +106,7 @@ const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: (
               onClick={onSelect}
               className="flex-1 py-3 px-4 bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 rounded-xl text-sm font-bold shadow-lg shadow-stone-900/10 hover:bg-stone-800 dark:hover:bg-white transition-all flex items-center justify-center gap-2"
             >
-              {canUseAiStudio ? 'Select API Key' : 'Open Setup Guide'}
+              {hasEnvKey ? 'Use Environment Key' : (canUseAiStudio ? 'Select API Key' : 'Open Setup Guide')}
             </button>
           </div>
         </div>
@@ -194,7 +195,8 @@ const App: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string>("");
   const [isGifGenerating, setIsGifGenerating] = useState<boolean>(false);
   const [isSuggestingStyle, setIsSuggestingStyle] = useState<boolean>(false);
-  const canUseAiStudio = Boolean(getAiStudioBridge()?.openSelectKey);
+  const hasEnvKey = hasConfiguredApiKey();
+  const canUseAiStudio = !hasEnvKey && Boolean(getAiStudioBridge()?.openSelectKey && getAiStudioBridge()?.hasSelectedApiKey);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -205,13 +207,27 @@ const App: React.FC = () => {
   }, [state]);
 
   const handleSelectKey = async () => {
-    setShowKeyDialog(false);
-    const bridge = getAiStudioBridge();
-    if (bridge?.openSelectKey) {
-      await bridge.openSelectKey();
-      // Assume selection success to avoid delay
+    if (hasConfiguredApiKey()) {
+      setShowKeyDialog(false);
       if (state === AppState.IDLE && viewMode === 'gallery') {
-         setViewMode('create');
+        setViewMode('create');
+      }
+      return;
+    }
+
+    const bridge = getAiStudioBridge();
+    if (bridge?.openSelectKey && bridge?.hasSelectedApiKey) {
+      await bridge.openSelectKey();
+
+      const selected = await bridge.hasSelectedApiKey();
+      if (selected) {
+        setShowKeyDialog(false);
+        if (state === AppState.IDLE && viewMode === 'gallery') {
+          setViewMode('create');
+        }
+      } else {
+        // Keep dialog open if selection did not succeed.
+        setShowKeyDialog(true);
       }
       return;
     }
@@ -482,7 +498,7 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen w-full flex flex-col bg-stone-50 dark:bg-zinc-950 text-stone-900 dark:text-stone-100 font-sans transition-colors duration-500 overflow-x-hidden selection:bg-stone-900 selection:text-white dark:selection:bg-white dark:selection:text-stone-900">
-      <ApiKeyDialog isOpen={showKeyDialog} onClose={() => setShowKeyDialog(false)} onSelect={handleSelectKey} canUseAiStudio={canUseAiStudio} />
+      <ApiKeyDialog isOpen={showKeyDialog} onClose={() => setShowKeyDialog(false)} onSelect={handleSelectKey} canUseAiStudio={canUseAiStudio} hasEnvKey={hasEnvKey} />
       
       <div className="flex-1 flex items-center justify-center p-4 lg:p-6 overflow-hidden">
         <div className={`transition-all duration-1000 ease-[cubic-bezier(0.25,0.8,0.25,1)] w-full flex flex-col lg:flex-row items-center justify-center ${isFlip ? 'max-w-6xl gap-0 lg:gap-0' : 'max-w-7xl gap-8 lg:gap-16'}`}>
