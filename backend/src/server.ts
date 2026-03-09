@@ -11,7 +11,7 @@ import { analyzeNavigatorTarget } from './navigatorAnalyzer.ts';
 import { executeNavigatorPlan } from './navigatorExecutor.ts';
 import { processLiveMessage } from './liveAgentService.ts';
 import { SessionStore } from './sessionStore.ts';
-import { buildStoryOutput } from './storytellerService.ts';
+import { buildStoryOutput, regenerateStoryBlock } from './storytellerService.ts';
 import {
   createSessionSchema,
   generateStorySchema,
@@ -19,6 +19,7 @@ import {
   liveMessageSchema,
   navigatorAnalyzeSchema,
   navigatorExecuteSchema,
+  regenerateStoryBlockSchema,
 } from './validators.ts';
 
 const app = express();
@@ -241,6 +242,47 @@ app.post('/api/story/generate', async (req, res) => {
     return res.json({ storyOutput });
   } catch (error: any) {
     return res.status(400).json({ error: error.message || 'Unable to generate story' });
+  }
+});
+
+app.post('/api/story/regenerate-block', async (req, res) => {
+  try {
+    const parsed = regenerateStoryBlockSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
+    }
+    const { sessionId, blockType, title } = parsed.data;
+    const session = getSessionOrThrow(sessionId);
+    if (!session.storyOutput) {
+      return res.status(400).json({ error: 'No story output exists for this session' });
+    }
+
+    const updated = await regenerateStoryBlock({
+      blockType,
+      title,
+      goal: session.goal,
+      liveIntent: session.liveIntent,
+    });
+
+    const targetIndex = session.storyOutput.blocks.findIndex((block) => {
+      if (blockType === 'text') return block.type === 'text' && block.title.toLowerCase().includes('script');
+      return block.type === blockType;
+    });
+    if (targetIndex < 0) {
+      return res.status(404).json({ error: `Target block not found for type: ${blockType}` });
+    }
+
+    session.storyOutput.blocks[targetIndex] = {
+      ...session.storyOutput.blocks[targetIndex],
+      title: updated.title,
+      content: updated.content,
+    };
+    appendLog(session, `Story block regenerated (${blockType})`);
+    await store.set(session);
+
+    return res.json({ storyOutput: session.storyOutput });
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Unable to regenerate story block' });
   }
 });
 

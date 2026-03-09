@@ -70,6 +70,12 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
 
+  regenerateStoryBlock: (payload: { sessionId: string; blockType: 'text' | 'narration' | 'caption' | 'cta'; title?: string }) =>
+    request<{ storyOutput: StoryOutput }>('/story/regenerate-block', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   analyzeNavigator: (payload: { sessionId: string; screenshotBase64: string; targetUrl?: string }) =>
     request<{ navigatorPlan: NavigatorPlan }>('/navigator/analyze', {
       method: 'POST',
