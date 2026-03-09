@@ -8,10 +8,12 @@ import {
   Session,
   StoryOutput,
   WorkflowStage,
-} from '../../shared/contracts.ts';
+} from '../../frontend/shared/contracts.ts';
+import { SessionStore } from './sessionStore.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
+const store = new SessionStore();
 
 const STAGE_ORDER: WorkflowStage[] = [
   'INTAKE',
@@ -22,8 +24,6 @@ const STAGE_ORDER: WorkflowStage[] = [
   'COMPLETION',
 ];
 
-const sessions = new Map<string, Session>();
-
 app.use(cors({ origin: ['http://localhost:3000'], credentials: false }));
 app.use(express.json({ limit: '10mb' }));
 
@@ -32,7 +32,7 @@ function nowIso() {
 }
 
 function getSessionOrThrow(sessionId: string): Session {
-  const session = sessions.get(sessionId);
+  const session = store.get(sessionId);
   if (!session) {
     throw new Error(`Session not found: ${sessionId}`);
   }
@@ -68,10 +68,10 @@ function ensureStage(session: Session, target: WorkflowStage) {
 }
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', sessions: sessions.size });
+  res.json({ status: 'ok', sessions: store.size });
 });
 
-app.post('/api/session/create', (req, res) => {
+app.post('/api/session/create', async (req, res) => {
   const goal = String(req.body?.goal || '').trim();
   if (!goal) {
     return res.status(400).json({ error: 'Goal is required' });
@@ -89,7 +89,7 @@ app.post('/api/session/create', (req, res) => {
     updatedAt: timestamp,
   };
 
-  sessions.set(session.sessionId, session);
+  await store.set(session);
   return res.json({ session });
 });
 
@@ -102,7 +102,7 @@ app.get('/api/session/:sessionId', (req, res) => {
   }
 });
 
-app.post('/api/live/message', (req, res) => {
+app.post('/api/live/message', async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || '').trim();
     const message = String(req.body?.message || '').trim();
@@ -131,6 +131,7 @@ app.post('/api/live/message', (req, res) => {
       moveStage(session, 'STORY_GENERATION');
       appendLog(session, 'Stage advanced to STORY_GENERATION');
     }
+    await store.set(session);
 
     return res.json({
       liveIntent,
@@ -141,7 +142,7 @@ app.post('/api/live/message', (req, res) => {
   }
 });
 
-app.post('/api/story/generate', (req, res) => {
+app.post('/api/story/generate', async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || '').trim();
     if (!sessionId) {
@@ -166,6 +167,7 @@ app.post('/api/story/generate', (req, res) => {
     appendLog(session, 'Story output generated');
     moveStage(session, 'STORY_REVIEW');
     appendLog(session, 'Stage advanced to STORY_REVIEW');
+    await store.set(session);
 
     return res.json({ storyOutput });
   } catch (error: any) {
@@ -173,7 +175,7 @@ app.post('/api/story/generate', (req, res) => {
   }
 });
 
-app.post('/api/navigator/analyze', (req, res) => {
+app.post('/api/navigator/analyze', async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || '').trim();
     const screenshotBase64 = String(req.body?.screenshotBase64 || '').trim();
@@ -206,13 +208,14 @@ app.post('/api/navigator/analyze', (req, res) => {
 
     session.navigatorPlan = navigatorPlan;
     appendLog(session, 'Navigator analysis generated');
+    await store.set(session);
     return res.json({ navigatorPlan });
   } catch (error: any) {
     return res.status(400).json({ error: error.message || 'Unable to analyze navigator input' });
   }
 });
 
-app.post('/api/navigator/execute', (req, res) => {
+app.post('/api/navigator/execute', async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || '').trim();
     if (!sessionId) {
@@ -247,6 +250,7 @@ app.post('/api/navigator/execute', (req, res) => {
     moveStage(session, 'COMPLETION');
     session.status = 'completed';
     appendLog(session, 'Stage advanced to COMPLETION and session marked completed');
+    await store.set(session);
 
     return res.json({ executionResult });
   } catch (error: any) {
@@ -254,6 +258,15 @@ app.post('/api/navigator/execute', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend server listening on http://localhost:${PORT}`);
+async function startServer() {
+  await store.initialize();
+  app.listen(PORT, () => {
+    console.log(`Backend server listening on http://localhost:${PORT}`);
+    console.log(`Loaded sessions: ${store.size}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error('Failed to start backend:', error);
+  process.exit(1);
 });

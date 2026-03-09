@@ -9,8 +9,7 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "type-motion": "file:.."
+    "express": "^5.1.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
