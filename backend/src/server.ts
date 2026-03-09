@@ -251,29 +251,44 @@ app.post('/api/story/regenerate-block', async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
-    const { sessionId, blockType, title } = parsed.data;
+    const { sessionId, blockType, title, blockIndex, currentContent } = parsed.data;
     const session = getSessionOrThrow(sessionId);
     if (!session.storyOutput) {
       return res.status(400).json({ error: 'No story output exists for this session' });
     }
 
-    const updated = await regenerateStoryBlock({
-      blockType,
-      title,
-      goal: session.goal,
-      liveIntent: session.liveIntent,
-    });
-
-    const targetIndex = session.storyOutput.blocks.findIndex((block) => {
-      if (blockType === 'text') return block.type === 'text' && block.title.toLowerCase().includes('script');
-      return block.type === blockType;
-    });
+    const targetIndex =
+      typeof blockIndex === 'number'
+        ? blockIndex
+        : session.storyOutput.blocks.findIndex((block) => {
+            if (block.type !== blockType) return false;
+            if (!title) return true;
+            return block.title.trim().toLowerCase() === title.trim().toLowerCase();
+          });
     if (targetIndex < 0) {
       return res.status(404).json({ error: `Target block not found for type: ${blockType}` });
     }
+    if (targetIndex >= session.storyOutput.blocks.length) {
+      return res.status(400).json({ error: `blockIndex out of range: ${targetIndex}` });
+    }
+
+    const targetBlock = session.storyOutput.blocks[targetIndex];
+    if (targetBlock.type !== blockType) {
+      return res.status(400).json({
+        error: `blockIndex type mismatch: expected ${blockType}, found ${targetBlock.type}`,
+      });
+    }
+
+    const updated = await regenerateStoryBlock({
+      blockType,
+      title: title || targetBlock.title,
+      goal: session.goal,
+      liveIntent: session.liveIntent,
+      currentContent: currentContent || targetBlock.content,
+    });
 
     session.storyOutput.blocks[targetIndex] = {
-      ...session.storyOutput.blocks[targetIndex],
+      ...targetBlock,
       title: updated.title,
       content: updated.content,
     };

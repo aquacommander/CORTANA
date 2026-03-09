@@ -248,7 +248,48 @@ export async function regenerateStoryBlock(options: {
   title?: string;
   goal: string;
   liveIntent?: LiveIntent;
+  currentContent?: string;
 }): Promise<{ title: string; content: string }> {
+  const ai = await getAI();
+  if (ai) {
+    const targetTitle =
+      options.title ||
+      (options.blockType === 'narration'
+        ? 'Voiceover'
+        : options.blockType === 'caption'
+          ? 'Caption'
+          : options.blockType === 'cta'
+            ? 'Call To Action'
+            : 'Script');
+
+    const rewritePrompt = `
+Rewrite the following campaign block with meaning preserved but clearly different wording.
+Return ONLY plain text.
+
+Block type: ${options.blockType}
+Block title: ${targetTitle}
+Goal: ${options.goal}
+Audience: ${options.liveIntent?.audience || 'general audience'}
+Tone: ${options.liveIntent?.tone || 'cinematic'}
+Platform: ${options.liveIntent?.platform || 'web'}
+Current content:
+${options.currentContent || ''}
+`;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: rewritePrompt,
+      });
+      const rewritten = String(response.text || '').trim();
+      if (rewritten && rewritten !== (options.currentContent || '').trim()) {
+        return { title: targetTitle, content: rewritten };
+      }
+    } catch {
+      // fall through to narrative fallback
+    }
+  }
+
   const narrative = await generateNarrativeFromGemini(options.goal, options.liveIntent);
 
   if (options.blockType === 'narration') {
@@ -262,8 +303,13 @@ export async function regenerateStoryBlock(options: {
   }
 
   // "text" block regeneration defaults to script content.
-  return {
-    title: options.title || 'Script',
-    content: narrative.script,
-  };
+  const fallbackText = narrative.script;
+  const current = (options.currentContent || '').trim();
+  if (fallbackText.trim() === current && current) {
+    return {
+      title: options.title || 'Script',
+      content: `${current} (refined version)`,
+    };
+  }
+  return { title: options.title || 'Script', content: fallbackText };
 }
