@@ -11,6 +11,12 @@ import { analyzeNavigatorTarget } from './navigatorAnalyzer.ts';
 import { executeNavigatorPlan } from './navigatorExecutor.ts';
 import { getKnowledgeContext } from './knowledgeService.ts';
 import { processLiveMessage } from './liveAgentService.ts';
+import {
+  hasRealtimeSession,
+  sendRealtimeMessage,
+  startRealtimeSession,
+  stopRealtimeSession,
+} from './liveRealtimeService.ts';
 import { SessionStore } from './sessionStore.ts';
 import { buildStoryOutput, regenerateStoryBlock } from './storytellerService.ts';
 import {
@@ -18,6 +24,8 @@ import {
   generateStorySchema,
   getZodErrorMessage,
   liveMessageSchema,
+  liveRealtimeMessageSchema,
+  liveRealtimeStartSchema,
   navigatorAnalyzeSchema,
   navigatorExecuteSchema,
   regenerateStoryBlockSchema,
@@ -234,6 +242,47 @@ app.post('/api/live/message-stream', async (req, res) => {
   }
 });
 
+app.post('/api/live/realtime/session/start', async (req, res) => {
+  const parsed = liveRealtimeStartSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
+  }
+  try {
+    const session = getSessionOrThrow(parsed.data.sessionId);
+    const live = await startRealtimeSession({
+      sessionId: session.sessionId,
+      goal: session.goal,
+    });
+    appendLog(session, `Realtime session started (${live.liveSessionId})`);
+    return res.json(live);
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Unable to start realtime session' });
+  }
+});
+
+app.post('/api/live/realtime/session/:liveSessionId/message', async (req, res) => {
+  const parsed = liveRealtimeMessageSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
+  }
+  try {
+    const { liveSessionId } = req.params;
+    if (!hasRealtimeSession(liveSessionId)) {
+      return res.status(404).json({ error: `Live session not found: ${liveSessionId}` });
+    }
+    const reply = await sendRealtimeMessage(liveSessionId, parsed.data.message);
+    return res.json({ reply });
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Unable to process realtime message' });
+  }
+});
+
+app.post('/api/live/realtime/session/:liveSessionId/stop', async (req, res) => {
+  const { liveSessionId } = req.params;
+  await stopRealtimeSession(liveSessionId);
+  return res.json({ stopped: true, liveSessionId });
+});
+
 app.post('/api/story/generate', async (req, res) => {
   try {
     const parsed = generateStorySchema.safeParse(req.body || {});
@@ -408,7 +457,7 @@ app.post('/api/navigator/analyze', async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
-    const { sessionId, screenshotBase64, targetUrl } = parsed.data;
+    const { sessionId, screenshotBase64, screenRecordingBase64, targetUrl } = parsed.data;
     if (targetUrl) {
       assertTargetUrlAllowed(targetUrl);
     }
@@ -423,10 +472,14 @@ app.post('/api/navigator/analyze', async (req, res) => {
       storyTitle: session.storyOutput?.title || `Story for "${session.goal}"`,
       goal: session.goal,
       screenshotBase64,
+      screenRecordingBase64,
     });
 
     session.navigatorPlan = navigatorPlan;
     appendLog(session, `Navigator screenshot received (${screenshotBase64.length} chars)`);
+    if (screenRecordingBase64) {
+      appendLog(session, `Navigator screen recording received (${screenRecordingBase64.length} chars)`);
+    }
     if (targetUrl) {
       session.navigatorTargetUrl = targetUrl;
       appendLog(session, `Navigator target URL set to ${targetUrl}`);

@@ -11,6 +11,9 @@ This folder contains the workflow/session backend used by the frontend.
 - `POST /api/session/:sessionId/restart-from-review`
 - `POST /api/live/message`
 - `POST /api/live/message-stream`
+- `POST /api/live/realtime/session/start`
+- `POST /api/live/realtime/session/:liveSessionId/message`
+- `POST /api/live/realtime/session/:liveSessionId/stop`
 - `POST /api/story/generate`
 - `POST /api/story/generate-stream`
 - `POST /api/story/regenerate-block`
@@ -43,11 +46,15 @@ Optional safety guardrail:
   `readyForStoryGeneration=true` after objective/audience/tone/platform are captured.
 - `POST /api/live/message-stream` returns a near-live NDJSON stream with incremental
   reply chunks (`delta`) and a final structured payload (`final` with `liveIntent` + `reply`).
+- Realtime session endpoints support provider modes via env:
+  - `LIVE_AGENT_PROVIDER=gemini_live|adk_compatible|genai_fallback`
+  - `GEMINI_LIVE_MODEL` (default: `gemini-live-2.5-flash-preview`)
+  The backend attempts a live connection when available and gracefully falls back.
 - `POST /api/story/generate-stream` returns NDJSON interleaved story blocks
   (`status`, `block`, `final`) for fluid mixed-media storytelling UX.
 - `POST /api/story/generate` requires a ready live intent and returns a full
-  mixed-media `StoryOutput` (summary, script, image block, video block,
-  narration, caption, CTA).
+  mixed-media `StoryOutput` (summary, script, image block, video block, audio
+  narration block, narration text, caption, CTA).
 - `POST /api/story/regenerate-block` lets users refine one textual story block
   (`text`, `narration`, `caption`, `cta`) without resetting the entire session.
 - Set `GEMINI_API_KEY` to enable backend Gemini text generation for storyline fields.
@@ -55,7 +62,8 @@ Optional safety guardrail:
   `backend/resources/*.md|*.txt` (top-ranked by query relevance). This replaces
   single-resource behavior and better adapts to diverse user goals/needs/interests.
 - Navigator analysis is visual-first when a screenshot is provided and Gemini key
-  is configured; it falls back to deterministic URL/selector heuristics if needed.
+  is configured; it can also accept screen recording context and falls back to
+  deterministic URL/selector heuristics if needed.
 
 ## Run
 
