@@ -109,6 +109,12 @@ Assert-True ($finalSession.workflowStage -eq "COMPLETION") "Final workflow stage
 Assert-True ($finalSession.status -eq "completed") "Final session status" ("status=" + $finalSession.status)
 Assert-True ($finalSession.logs.Count -ge 1) "Final logs exist" ("logs=" + $finalSession.logs.Count)
 
+# Test 10: Restart from review for rerun
+$restartResponse = Invoke-Json "POST" "$BaseUrl/api/session/$sessionId/restart-from-review"
+$restartSession = $restartResponse.session
+Assert-True ($restartSession.workflowStage -eq "STORY_REVIEW") "Restart session stage" ("workflowStage=" + $restartSession.workflowStage)
+Assert-True ($restartSession.status -eq "active") "Restart session status" ("status=" + $restartSession.status)
+
 Write-Host ""
 Write-Host "All tests passed." -ForegroundColor Green
 Write-Host "Final session ID: $sessionId"

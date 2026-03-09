@@ -8,6 +8,7 @@ This folder contains the workflow/session backend used by the frontend.
 - `GET /api/session`
 - `POST /api/session/create`
 - `GET /api/session/:sessionId`
+- `POST /api/session/:sessionId/restart-from-review`
 - `POST /api/live/message`
 - `POST /api/story/generate`
 - `POST /api/navigator/analyze`
@@ -27,6 +28,11 @@ For playwright mode, provide a target page URL via:
 
 - request body `targetUrl`
 - or env var `NAVIGATOR_TARGET_URL`
+
+Optional safety guardrail:
+
+- `NAVIGATOR_ALLOWED_HOSTS=example.com,localhost`
+- When set, both analyze and execute reject non-allowed hosts.
 
 ## Run
 

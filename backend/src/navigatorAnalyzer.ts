@@ -7,9 +7,9 @@ type AnalyzeNavigatorOptions = {
 };
 
 type SelectorHints = {
-  titleInput: string;
-  descriptionInput: string;
-  submitButton: string;
+  titleInput?: string;
+  descriptionInput?: string;
+  submitButton?: string;
 };
 
 const FALLBACK_SELECTORS: SelectorHints = {
@@ -34,18 +34,58 @@ function buildPlanFromSelectors(
   notes: string,
   confidence: number,
 ): NavigatorPlan {
+  const clamp = (value: number) => Math.max(0.6, Math.min(0.99, Number(value.toFixed(2))));
+  const detectedElements: NavigatorPlan['detectedElements'] = [];
+  const actionPlan: NavigatorPlan['actionPlan'] = [];
+
+  if (selectors.titleInput) {
+    detectedElements.push({ name: 'Title input', selectorHint: selectors.titleInput, confidence: clamp(confidence) });
+    actionPlan.push({ action: 'click', target: selectors.titleInput, confidence: clamp(confidence), reason: 'Focus title field' });
+    actionPlan.push({
+      action: 'type',
+      target: selectors.titleInput,
+      value: titleValue,
+      confidence: clamp(confidence - 0.01),
+      reason: 'Set title',
+    });
+  }
+
+  if (selectors.descriptionInput) {
+    detectedElements.push({
+      name: 'Description input',
+      selectorHint: selectors.descriptionInput,
+      confidence: clamp(confidence - 0.03),
+    });
+  }
+
+  if (selectors.submitButton) {
+    detectedElements.push({
+      name: 'Publish button',
+      selectorHint: selectors.submitButton,
+      confidence: clamp(confidence - 0.02),
+    });
+    actionPlan.push({
+      action: 'click',
+      target: selectors.submitButton,
+      confidence: clamp(confidence - 0.02),
+      reason: 'Publish story',
+    });
+  }
+
+  if (actionPlan.length === 0) {
+    actionPlan.push({
+      action: 'wait',
+      target: 'body',
+      value: '500',
+      confidence: 0.6,
+      reason: 'No actionable selectors detected, keeping workflow deterministic.',
+    });
+  }
+
   return {
-    detectedElements: [
-      { name: 'Title input', selectorHint: selectors.titleInput, confidence },
-      { name: 'Description input', selectorHint: selectors.descriptionInput, confidence: Math.max(0.6, confidence - 0.03) },
-      { name: 'Publish button', selectorHint: selectors.submitButton, confidence: Math.max(0.6, confidence - 0.02) },
-    ],
-    actionPlan: [
-      { action: 'click', target: selectors.titleInput, confidence, reason: 'Focus title field' },
-      { action: 'type', target: selectors.titleInput, value: titleValue, confidence: Math.max(0.6, confidence - 0.01), reason: 'Set title' },
-      { action: 'click', target: selectors.submitButton, confidence: Math.max(0.6, confidence - 0.02), reason: 'Publish story' },
-    ],
-    confidence,
+    detectedElements,
+    actionPlan,
+    confidence: clamp(confidence),
     notes,
   };
 }
@@ -121,14 +161,14 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
       return { titleInput, descriptionInput, submitButton };
     });
 
-    if (!selectors.titleInput || !selectors.submitButton) {
+    if (!selectors.titleInput && !selectors.submitButton) {
       return null;
     }
 
     return {
-      titleInput: selectors.titleInput,
-      descriptionInput: selectors.descriptionInput || FALLBACK_SELECTORS.descriptionInput,
-      submitButton: selectors.submitButton,
+      titleInput: selectors.titleInput || undefined,
+      descriptionInput: selectors.descriptionInput || undefined,
+      submitButton: selectors.submitButton || undefined,
     };
   } finally {
     await browser.close();
