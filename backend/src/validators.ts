@@ -17,8 +17,13 @@ export const liveMessageSchema = z.object({
 
 export const generateStorySchema = z.object({
   sessionId: requiredString('sessionId', 120),
+  text: z.string().trim().max(2000, 'text is too long').optional(),
+  style: z.string().trim().max(2000, 'style is too long').optional(),
+  typographyPrompt: z.string().trim().max(2000, 'typographyPrompt is too long').optional(),
+  referenceImage: z.string().trim().max(30000000, 'referenceImage is too long').optional(),
   imageUrl: z.string().trim().url('imageUrl must be a valid URL').optional(),
   videoUrl: z.string().trim().url('videoUrl must be a valid URL').optional(),
+  generateAssets: z.boolean().optional(),
 });
 
 export const navigatorAnalyzeSchema = z.object({

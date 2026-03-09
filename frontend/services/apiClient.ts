@@ -55,7 +55,16 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
 
-  generateStory: (payload: { sessionId: string; imageUrl?: string; videoUrl?: string }) =>
+  generateStory: (payload: {
+    sessionId: string;
+    text?: string;
+    style?: string;
+    typographyPrompt?: string;
+    referenceImage?: string;
+    imageUrl?: string;
+    videoUrl?: string;
+    generateAssets?: boolean;
+  }) =>
     request<{ storyOutput: StoryOutput }>('/story/generate', {
       method: 'POST',
       body: JSON.stringify(payload),

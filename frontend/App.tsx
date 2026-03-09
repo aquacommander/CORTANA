@@ -245,6 +245,11 @@ const WorkflowProgress: React.FC<{ activeStage: WorkflowStage; progressPercent: 
   );
 };
 
+const getStoryAssetUrl = (session: Session | null, type: 'image' | 'video'): string | undefined => {
+  const block = session?.storyOutput?.blocks.find((item) => item.type === type);
+  return block?.assetUrl;
+};
+
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
   const [viewMode, setViewMode] = useState<'gallery' | 'create'>('gallery');
@@ -525,19 +530,54 @@ const App: React.FC = () => {
     }
 
     try {
-      const { data: b64Image, mimeType } = await generateTextImage({
-        text: inputText, 
-        style: styleToUse,
-        typographyPrompt: typographyPrompt,
-        referenceImage: referenceImage || undefined
-      });
+      let resolvedImageUrl: string | undefined;
+      let resolvedVideoUrl: string | undefined;
+      let screenshotBase64 = 'ZmFrZQ==';
 
-      setImageSrc(`data:${mimeType};base64,${b64Image}`);
-      setState(AppState.GENERATING_VIDEO);
-      setStatusMessage("Animating...");
+      if (activeSessionId) {
+        try {
+          await apiClient.generateStory({
+            sessionId: activeSessionId,
+            text: inputText,
+            style: styleToUse,
+            typographyPrompt: typographyPrompt,
+            referenceImage: referenceImage || undefined,
+            generateAssets: true,
+          });
+          const refreshed = await refreshLoadedSession(activeSessionId);
+          resolvedImageUrl = getStoryAssetUrl(refreshed, 'image');
+          resolvedVideoUrl = getStoryAssetUrl(refreshed, 'video');
+          if (resolvedImageUrl) {
+            setImageSrc(resolvedImageUrl);
+            if (resolvedImageUrl.startsWith('data:')) {
+              screenshotBase64 = resolvedImageUrl.split(',')[1] || screenshotBase64;
+            }
+          }
+        } catch (backendError) {
+          console.warn('Backend storyteller generation unavailable, fallback to local media generation.', backendError);
+        }
+      }
 
-      const videoUrl = await generateTextVideo(inputText, b64Image, mimeType, styleToUse);
-      setVideoSrc(videoUrl);
+      if (!resolvedVideoUrl) {
+        const { data: b64Image, mimeType } = await generateTextImage({
+          text: inputText,
+          style: styleToUse,
+          typographyPrompt: typographyPrompt,
+          referenceImage: referenceImage || undefined,
+        });
+
+        resolvedImageUrl = `data:${mimeType};base64,${b64Image}`;
+        screenshotBase64 = b64Image;
+        setImageSrc(resolvedImageUrl);
+        setState(AppState.GENERATING_VIDEO);
+        setStatusMessage("Animating...");
+
+        resolvedVideoUrl = await generateTextVideo(inputText, b64Image, mimeType, styleToUse);
+      }
+
+      if (resolvedVideoUrl) {
+        setVideoSrc(resolvedVideoUrl);
+      }
       setState(AppState.PLAYING);
       setStatusMessage("Done.");
 
@@ -545,13 +585,18 @@ const App: React.FC = () => {
         try {
           await apiClient.generateStory({
             sessionId: activeSessionId,
-            imageUrl: `data:${mimeType};base64,${b64Image}`,
-            videoUrl,
+            text: inputText,
+            style: styleToUse,
+            typographyPrompt: typographyPrompt,
+            referenceImage: referenceImage || undefined,
+            imageUrl: resolvedImageUrl,
+            videoUrl: resolvedVideoUrl,
+            generateAssets: false,
           });
           setWorkflowStageOverride('STORY_REVIEW');
           await apiClient.analyzeNavigator({
             sessionId: activeSessionId,
-            screenshotBase64: b64Image,
+            screenshotBase64,
             targetUrl: navigatorTargetUrl.trim() || undefined,
           });
           setWorkflowStageOverride('NAVIGATOR_ANALYSIS');
@@ -571,7 +616,6 @@ const App: React.FC = () => {
           console.warn('Failed to sync navigator workflow stages.', backendError);
         }
       }
-
     } catch (err: any) {
       console.error(err);
       const msg = err.message || "";

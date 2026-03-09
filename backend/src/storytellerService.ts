@@ -4,8 +4,12 @@ type BuildStoryOptions = {
   sessionId: string;
   goal: string;
   liveIntent?: LiveIntent;
+  style?: string;
+  typographyPrompt?: string;
+  referenceImage?: string;
   imageUrl?: string;
   videoUrl?: string;
+  generateAssets?: boolean;
 };
 
 async function getAI(): Promise<any | null> {
@@ -13,6 +17,104 @@ async function getAI(): Promise<any | null> {
   if (!key) return null;
   const { GoogleGenAI } = await import('@google/genai');
   return new GoogleGenAI({ apiKey: key });
+}
+
+function cleanBase64(data: string): string {
+  return data.replace(/^data:.*,/, '');
+}
+
+async function generateImageAsset(options: {
+  goal: string;
+  liveIntent?: LiveIntent;
+  style?: string;
+  typographyPrompt?: string;
+  referenceImage?: string;
+}): Promise<string | undefined> {
+  const ai = await getAI();
+  if (!ai) return undefined;
+
+  const parts: any[] = [];
+  if (options.referenceImage) {
+    const [prefix, data] = options.referenceImage.split(';base64,');
+    if (data && prefix) {
+      parts.push({
+        inlineData: {
+          data,
+          mimeType: prefix.replace('data:', ''),
+        },
+      });
+    }
+  }
+  parts.push({
+    text: `Create a cinematic campaign key visual for "${options.goal}".
+Audience: ${options.liveIntent?.audience || 'general audience'}
+Tone: ${options.liveIntent?.tone || 'cinematic'}
+Platform: ${options.liveIntent?.platform || 'web'}
+Style: ${options.style || 'high quality cinematic'}
+Typography: ${options.typographyPrompt || 'clean, legible campaign typography'}
+Return image only.`,
+  });
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image-preview',
+      contents: { parts },
+      config: {
+        imageConfig: {
+          aspectRatio: '16:9',
+          imageSize: '1K',
+        },
+      },
+    });
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData?.data) {
+        const mimeType = part.inlineData.mimeType || 'image/png';
+        return `data:${mimeType};base64,${part.inlineData.data}`;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+async function generateVideoAsset(options: {
+  goal: string;
+  liveIntent?: LiveIntent;
+  style?: string;
+  imageDataUrl?: string;
+}): Promise<string | undefined> {
+  const ai = await getAI();
+  if (!ai) return undefined;
+
+  try {
+    const op = await ai.models.generateVideos({
+      model: 'veo-3.1-fast-generate-preview',
+      prompt: `Create a short cinematic promotional video for "${options.goal}".
+Audience: ${options.liveIntent?.audience || 'general audience'}
+Tone: ${options.liveIntent?.tone || 'cinematic'}
+Platform: ${options.liveIntent?.platform || 'web'}
+Style: ${options.style || 'high quality campaign style'}`,
+      config: {
+        numberOfVideos: 1,
+        aspectRatio: '16:9',
+        resolution: '720p',
+      },
+    });
+
+    let current = op;
+    const start = Date.now();
+    while (!current.done && Date.now() - start < 120000) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      current = await ai.operations.getVideosOperation({ operation: current });
+    }
+    const uri = current.response?.generatedVideos?.[0]?.video?.uri;
+    if (!uri) return undefined;
+    const key = (process.env.GEMINI_API_KEY || '').trim();
+    return key ? `${uri}${uri.includes('?') ? '&' : '?'}key=${key}` : uri;
+  } catch {
+    return undefined;
+  }
 }
 
 async function generateNarrativeFromGemini(goal: string, liveIntent?: LiveIntent) {
@@ -76,6 +178,28 @@ Output only valid JSON.
 
 export async function buildStoryOutput(options: BuildStoryOptions): Promise<StoryOutput> {
   const narrative = await generateNarrativeFromGemini(options.goal, options.liveIntent);
+  let resolvedImageUrl = options.imageUrl;
+  let resolvedVideoUrl = options.videoUrl;
+
+  if (options.generateAssets) {
+    if (!resolvedImageUrl) {
+      resolvedImageUrl = await generateImageAsset({
+        goal: options.goal,
+        liveIntent: options.liveIntent,
+        style: options.style,
+        typographyPrompt: options.typographyPrompt,
+        referenceImage: options.referenceImage,
+      });
+    }
+    if (!resolvedVideoUrl) {
+      resolvedVideoUrl = await generateVideoAsset({
+        goal: options.goal,
+        liveIntent: options.liveIntent,
+        style: options.style,
+        imageDataUrl: resolvedImageUrl,
+      });
+    }
+  }
 
   return {
     storyId: options.sessionId,
@@ -87,15 +211,29 @@ export async function buildStoryOutput(options: BuildStoryOptions): Promise<Stor
         type: 'image',
         title: 'Key Visual',
         content: 'Primary campaign visual',
-        assetUrl: options.imageUrl,
-        metadata: { status: options.imageUrl ? 'ready' : 'missing', source: options.imageUrl ? 'client_generated' : 'pending_generation' },
+        assetUrl: resolvedImageUrl,
+        metadata: {
+          status: resolvedImageUrl ? 'ready' : 'missing',
+          source: resolvedImageUrl
+            ? options.imageUrl
+              ? 'client_generated'
+              : 'backend_generated'
+            : 'pending_generation',
+        },
       },
       {
         type: 'video',
         title: 'Promo Clip',
         content: 'Short cinematic promotional video',
-        assetUrl: options.videoUrl,
-        metadata: { status: options.videoUrl ? 'ready' : 'missing', source: options.videoUrl ? 'client_generated' : 'pending_generation' },
+        assetUrl: resolvedVideoUrl,
+        metadata: {
+          status: resolvedVideoUrl ? 'ready' : 'missing',
+          source: resolvedVideoUrl
+            ? options.videoUrl
+              ? 'client_generated'
+              : 'backend_generated'
+            : 'pending_generation',
+        },
       },
       { type: 'narration', title: 'Voiceover', content: narrative.narration },
       { type: 'caption', title: 'Caption', content: narrative.caption },
