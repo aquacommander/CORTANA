@@ -256,6 +256,14 @@ const App: React.FC = () => {
   const [isLoadingSession, setIsLoadingSession] = useState<boolean>(false);
   const [isRestartingSession, setIsRestartingSession] = useState<boolean>(false);
   const [isRerunningNavigator, setIsRerunningNavigator] = useState<boolean>(false);
+  const [recentSessions, setRecentSessions] = useState<Array<{
+    sessionId: string;
+    goal: string;
+    status: Session['status'];
+    workflowStage: Session['workflowStage'];
+    updatedAt: string;
+  }>>([]);
+  const [isRefreshingSessions, setIsRefreshingSessions] = useState<boolean>(false);
   const [navigatorTargetUrl, setNavigatorTargetUrl] = useState<string>("");
   const [navigatorMode, setNavigatorMode] = useState<'mock' | 'playwright'>('mock');
 
@@ -282,6 +290,24 @@ const App: React.FC = () => {
       setViewMode('create');
     }
   }, [state]);
+
+  useEffect(() => {
+    if (viewMode !== 'create') return;
+    const loadRecentSessions = async () => {
+      setIsRefreshingSessions(true);
+      try {
+        const { sessions } = await apiClient.listSessions();
+        setRecentSessions(
+          [...sessions].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(0, 8),
+        );
+      } catch {
+        // Silent by design; manual controls are still available.
+      } finally {
+        setIsRefreshingSessions(false);
+      }
+    };
+    loadRecentSessions();
+  }, [viewMode]);
 
   const handleSelectKey = async () => {
     if (hasConfiguredApiKey()) {
@@ -331,6 +357,20 @@ const App: React.FC = () => {
     return session;
   };
 
+  const handleRefreshSessionList = async () => {
+    setIsRefreshingSessions(true);
+    try {
+      const { sessions } = await apiClient.listSessions();
+      setRecentSessions(
+        [...sessions].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(0, 8),
+      );
+    } catch (error: any) {
+      setStatusMessage(error.message || 'Unable to refresh session list');
+    } finally {
+      setIsRefreshingSessions(false);
+    }
+  };
+
   const handleLoadSession = async () => {
     const id = sessionLookupId.trim();
     if (!id) return;
@@ -339,6 +379,7 @@ const App: React.FC = () => {
       const session = await refreshLoadedSession(id);
       setStatusMessage(`Loaded session: ${session.status}`);
       setViewMode('create');
+      await handleRefreshSessionList();
     } catch (error: any) {
       setStatusMessage(error.message || 'Unable to load session');
       setLoadedSession(null);
@@ -359,6 +400,7 @@ const App: React.FC = () => {
       setSessionLookupId(session.sessionId);
       setStatusMessage('Session restarted from STORY_REVIEW');
       setViewMode('create');
+      await handleRefreshSessionList();
     } catch (error: any) {
       setStatusMessage(error.message || 'Unable to restart session');
     } finally {
@@ -386,6 +428,7 @@ const App: React.FC = () => {
       const session = await refreshLoadedSession(id);
       setStatusMessage(`Re-run finished with status: ${executionResult.status}`);
       setSessionLookupId(session.sessionId);
+      await handleRefreshSessionList();
     } catch (error: any) {
       setStatusMessage(error.message || 'Navigator re-run failed');
     } finally {
@@ -624,6 +667,33 @@ const App: React.FC = () => {
                 Load Session
               </button>
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <select
+                value=""
+                onChange={(e) => {
+                  const id = e.target.value;
+                  if (!id) return;
+                  setSessionLookupId(id);
+                }}
+                className="md:col-span-2 w-full bg-white dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm text-stone-900 dark:text-white"
+              >
+                <option value="">Select from recent sessions</option>
+                {recentSessions.map((session) => (
+                  <option key={session.sessionId} value={session.sessionId}>
+                    {session.sessionId.slice(0, 8)}... | {session.workflowStage} | {session.status}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleRefreshSessionList}
+                disabled={isRefreshingSessions}
+                className="px-4 py-2 rounded-lg border border-stone-300 dark:border-zinc-700 text-sm font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isRefreshingSessions ? <Loader2 size={14} className="animate-spin" /> : null}
+                Refresh List
+              </button>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <input
                 type="url"
@@ -667,10 +737,17 @@ const App: React.FC = () => {
                   Loaded {loadedSession.sessionId} | stage: {loadedSession.workflowStage} | status: {loadedSession.status} | logs: {loadedSession.logs.length}
                 </p>
                 {loadedSession.executionResult && (
-                  <p>
-                    Last execution: {loadedSession.executionResult.status} | completed actions: {loadedSession.executionResult.completedActions}
-                    {loadedSession.executionResult.error ? ` | error: ${loadedSession.executionResult.error}` : ''}
-                  </p>
+                  <div className="space-y-1">
+                    <p>
+                      Last execution: {loadedSession.executionResult.status} | completed actions: {loadedSession.executionResult.completedActions}
+                      {loadedSession.executionResult.error ? ` | error: ${loadedSession.executionResult.error}` : ''}
+                    </p>
+                    {loadedSession.executionResult.steps.some((step) => step.status === 'failed') && (
+                      <p>
+                        Failed steps: {loadedSession.executionResult.steps.filter((step) => step.status === 'failed').length}
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             )}

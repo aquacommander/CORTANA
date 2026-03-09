@@ -33,6 +33,17 @@ export const apiClient = {
 
   getSession: (sessionId: string) => request<{ session: Session }>(`/session/${sessionId}`),
 
+  listSessions: () =>
+    request<{
+      sessions: Array<{
+        sessionId: string;
+        goal: string;
+        status: Session['status'];
+        workflowStage: Session['workflowStage'];
+        updatedAt: string;
+      }>;
+    }>('/session'),
+
   restartSessionFromReview: (sessionId: string) =>
     request<{ session: Session }>(`/session/${sessionId}/restart-from-review`, {
       method: 'POST',
