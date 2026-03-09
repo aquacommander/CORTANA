@@ -1,6 +1,6 @@
 import { LiveIntent, NavigatorPlan, ExecutionResult, Session, StoryOutput } from '../shared/contracts';
 
-const API_BASE = '/api';
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || '/api';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {

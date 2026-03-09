@@ -7,6 +7,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AppState, WorkflowViewState } from './types';
 import { generateTextImage, generateTextVideo, generateStyleSuggestion } from './services/geminiService';
+import { apiClient } from './services/apiClient';
 import { getRandomStyle, fileToBase64, TYPOGRAPHY_SUGGESTIONS, createGifFromVideo } from './utils';
 import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck } from 'lucide-react';
 import { WorkflowStage } from './shared/contracts';
@@ -248,6 +249,8 @@ const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
   const [viewMode, setViewMode] = useState<'gallery' | 'create'>('gallery');
   const [showKeyDialog, setShowKeyDialog] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [workflowStageOverride, setWorkflowStageOverride] = useState<WorkflowStage | null>(null);
 
   const [inputText, setInputText] = useState<string>("");
   const [inputStyle, setInputStyle] = useState<string>("");
@@ -261,7 +264,9 @@ const App: React.FC = () => {
   const [isSuggestingStyle, setIsSuggestingStyle] = useState<boolean>(false);
   const hasEnvKey = hasConfiguredApiKey();
   const canUseAiStudio = !hasEnvKey && Boolean(getAiStudioBridge()?.openSelectKey && getAiStudioBridge()?.hasSelectedApiKey);
-  const workflowViewState = getWorkflowViewState(viewMode, state);
+  const computedWorkflowViewState = workflowStageOverride
+    ? { stage: workflowStageOverride, progressPercent: WORKFLOW_STAGE_PROGRESS[workflowStageOverride] }
+    : getWorkflowViewState(viewMode, state);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -329,6 +334,22 @@ const App: React.FC = () => {
     
     const styleToUse = inputStyle.trim() || getRandomStyle();
     setStatusMessage(`Designing "${inputText}"...`);
+    setWorkflowStageOverride('INTAKE');
+
+    let activeSessionId = sessionId;
+    try {
+      if (!activeSessionId) {
+        const { session } = await apiClient.createSession(inputText);
+        activeSessionId = session.sessionId;
+        setSessionId(session.sessionId);
+      }
+      if (activeSessionId) {
+        await apiClient.sendLiveMessage({ sessionId: activeSessionId, message: inputText });
+        setWorkflowStageOverride('STORY_GENERATION');
+      }
+    } catch (backendError) {
+      console.warn('Backend workflow unavailable, continuing local generation.', backendError);
+    }
 
     try {
       const { data: b64Image, mimeType } = await generateTextImage({
@@ -341,11 +362,31 @@ const App: React.FC = () => {
       setImageSrc(`data:${mimeType};base64,${b64Image}`);
       setState(AppState.GENERATING_VIDEO);
       setStatusMessage("Animating...");
+
+      if (activeSessionId) {
+        try {
+          await apiClient.generateStory({ sessionId: activeSessionId });
+          setWorkflowStageOverride('STORY_REVIEW');
+        } catch (backendError) {
+          console.warn('Failed to sync STORY_REVIEW stage.', backendError);
+        }
+      }
       
       const videoUrl = await generateTextVideo(inputText, b64Image, mimeType, styleToUse);
       setVideoSrc(videoUrl);
       setState(AppState.PLAYING);
       setStatusMessage("Done.");
+
+      if (activeSessionId) {
+        try {
+          await apiClient.analyzeNavigator({ sessionId: activeSessionId, screenshotBase64: b64Image });
+          setWorkflowStageOverride('NAVIGATOR_ANALYSIS');
+          await apiClient.executeNavigator({ sessionId: activeSessionId });
+          setWorkflowStageOverride('COMPLETION');
+        } catch (backendError) {
+          console.warn('Failed to sync navigator workflow stages.', backendError);
+        }
+      }
 
     } catch (err: any) {
       console.error(err);
@@ -365,6 +406,8 @@ const App: React.FC = () => {
     setVideoSrc(null);
     setImageSrc(null);
     setIsGifGenerating(false);
+    setSessionId(null);
+    setWorkflowStageOverride(null);
   };
 
   const handleDownload = () => {
@@ -565,7 +608,7 @@ const App: React.FC = () => {
     <div className="min-h-screen w-full flex flex-col bg-stone-50 dark:bg-zinc-950 text-stone-900 dark:text-stone-100 font-sans transition-colors duration-500 overflow-x-hidden selection:bg-stone-900 selection:text-white dark:selection:bg-white dark:selection:text-stone-900">
       <ApiKeyDialog isOpen={showKeyDialog} onClose={() => setShowKeyDialog(false)} onSelect={handleSelectKey} canUseAiStudio={canUseAiStudio} hasEnvKey={hasEnvKey} />
       <div className="w-full flex justify-center">
-        <WorkflowProgress activeStage={workflowViewState.stage} progressPercent={workflowViewState.progressPercent} />
+        <WorkflowProgress activeStage={computedWorkflowViewState.stage} progressPercent={computedWorkflowViewState.progressPercent} />
       </div>
 
       <div className="flex-1 flex items-center justify-center p-4 lg:p-6 overflow-hidden">
