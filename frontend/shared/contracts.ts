@@ -31,6 +31,8 @@ export interface LiveIntent {
   platform: string;
   readyForStoryGeneration: boolean;
   handoffTo: 'storyteller' | 'navigator' | 'none';
+  missingFields?: Array<'objective' | 'audience' | 'tone' | 'platform'>;
+  confidence?: number;
 }
 
 export interface NavigatorAction {

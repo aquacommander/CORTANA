@@ -170,7 +170,7 @@ app.post('/api/live/message', async (req, res) => {
     const { sessionId, message } = parsed.data;
 
     const session = getSessionOrThrow(sessionId);
-    const { liveIntent, reply } = processLiveMessage({
+    const { liveIntent, reply } = await processLiveMessage({
       message,
       goal: session.goal,
       previousIntent: session.liveIntent,
@@ -201,7 +201,16 @@ app.post('/api/story/generate', async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
-    const { sessionId, imageUrl, videoUrl } = parsed.data;
+    const {
+      sessionId,
+      text,
+      style,
+      typographyPrompt,
+      referenceImage,
+      imageUrl,
+      videoUrl,
+      generateAssets,
+    } = parsed.data;
     const session = getSessionOrThrow(sessionId);
 
     ensureStage(session, 'STORY_GENERATION');
@@ -213,10 +222,14 @@ app.post('/api/story/generate', async (req, res) => {
 
     const storyOutput = await buildStoryOutput({
       sessionId: randomUUID(),
-      goal: session.goal,
+      goal: text?.trim() || session.goal,
       liveIntent: session.liveIntent,
+      style,
+      typographyPrompt,
+      referenceImage,
       imageUrl,
       videoUrl,
+      generateAssets: generateAssets ?? false,
     });
 
     session.storyOutput = storyOutput;
