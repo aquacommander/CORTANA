@@ -1,4 +1,8 @@
 import { ExecutionResult, NavigatorAction, NavigatorPlan } from '../../frontend/shared/contracts.ts';
+import { randomUUID } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 export type NavigatorExecutionMode = 'mock' | 'playwright';
 
@@ -38,6 +42,42 @@ function buildMockResult(actionPlan: NavigatorAction[]): ExecutionResult {
   };
 }
 
+async function resolveUploadPath(value: string): Promise<string> {
+  if (value.startsWith('data:')) {
+    const matches = value.match(/^data:(.*?);base64,(.*)$/);
+    if (!matches) throw new Error('Invalid data URL for upload_file action');
+    const mimeType = matches[1] || 'application/octet-stream';
+    const base64 = matches[2];
+    const extension =
+      mimeType.includes('png') ? '.png' :
+      mimeType.includes('jpeg') || mimeType.includes('jpg') ? '.jpg' :
+      mimeType.includes('gif') ? '.gif' :
+      mimeType.includes('webp') ? '.webp' :
+      mimeType.includes('mp4') ? '.mp4' : '.bin';
+    const tempPath = path.join(os.tmpdir(), `navigator-upload-${randomUUID()}${extension}`);
+    await writeFile(tempPath, Buffer.from(base64, 'base64'));
+    return tempPath;
+  }
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    const response = await fetch(value);
+    if (!response.ok) {
+      throw new Error(`Failed to download upload_file source: ${response.status}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    const extension =
+      contentType.includes('png') ? '.png' :
+      contentType.includes('jpeg') || contentType.includes('jpg') ? '.jpg' :
+      contentType.includes('gif') ? '.gif' :
+      contentType.includes('webp') ? '.webp' :
+      contentType.includes('mp4') ? '.mp4' : '.bin';
+    const tempPath = path.join(os.tmpdir(), `navigator-upload-${randomUUID()}${extension}`);
+    await writeFile(tempPath, Buffer.from(arrayBuffer));
+    return tempPath;
+  }
+  return value;
+}
+
 async function executeWithPlaywright(
   actionPlan: NavigatorAction[],
   targetUrl: string,
@@ -73,7 +113,8 @@ async function executeWithPlaywright(
           await page.locator(step.target).scrollIntoViewIfNeeded();
         } else if (step.action === 'upload_file') {
           if (!step.value) throw new Error('Missing file path in step.value');
-          await page.setInputFiles(step.target, step.value);
+          const uploadPath = await resolveUploadPath(step.value);
+          await page.setInputFiles(step.target, uploadPath);
         } else {
           throw new Error(`Unsupported action: ${step.action}`);
         }

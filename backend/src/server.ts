@@ -473,6 +473,16 @@ app.post('/api/navigator/analyze', async (req, res) => {
       goal: session.goal,
       screenshotBase64,
       screenRecordingBase64,
+      storyContext: session.storyOutput
+        ? {
+            summary: session.storyOutput.blocks.find((block) => block.type === 'text' && block.title === 'Summary')?.content,
+            script: session.storyOutput.blocks.find((block) => block.type === 'text' && block.title === 'Script')?.content,
+            caption: session.storyOutput.blocks.find((block) => block.type === 'caption')?.content,
+            cta: session.storyOutput.blocks.find((block) => block.type === 'cta')?.content,
+            imageAssetUrl: session.storyOutput.blocks.find((block) => block.type === 'image')?.assetUrl,
+            videoAssetUrl: session.storyOutput.blocks.find((block) => block.type === 'video')?.assetUrl,
+          }
+        : undefined,
     });
 
     session.navigatorPlan = navigatorPlan;
