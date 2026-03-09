@@ -274,6 +274,8 @@ const App: React.FC = () => {
   const [intakeMessage, setIntakeMessage] = useState<string>("");
   const [intakeTranscript, setIntakeTranscript] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   const [isSendingIntake, setIsSendingIntake] = useState<boolean>(false);
+  const [isListeningIntake, setIsListeningIntake] = useState<boolean>(false);
+  const [isRegeneratingBlock, setIsRegeneratingBlock] = useState<boolean>(false);
 
   const [inputText, setInputText] = useState<string>("");
   const [inputStyle, setInputStyle] = useState<string>("");
@@ -479,6 +481,51 @@ const App: React.FC = () => {
       setStatusMessage(error.message || 'Unable to send intake message');
     } finally {
       setIsSendingIntake(false);
+    }
+  };
+
+  const handleStartListening = () => {
+    const SpeechRecognitionImpl =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionImpl) {
+      setStatusMessage('Speech recognition is not supported in this browser.');
+      return;
+    }
+
+    const recognition = new SpeechRecognitionImpl();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    setIsListeningIntake(true);
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results?.[0]?.[0]?.transcript || '';
+      if (transcript) setIntakeMessage(transcript);
+    };
+    recognition.onerror = () => {
+      setStatusMessage('Voice capture failed. Please type your message.');
+      setIsListeningIntake(false);
+    };
+    recognition.onend = () => {
+      setIsListeningIntake(false);
+    };
+
+    recognition.start();
+  };
+
+  const handleRegenerateStoryBlock = async (blockType: 'text' | 'narration' | 'caption' | 'cta') => {
+    const id = (loadedSession?.sessionId || sessionId || sessionLookupId).trim();
+    if (!id) return;
+    setIsRegeneratingBlock(true);
+    try {
+      await apiClient.regenerateStoryBlock({ sessionId: id, blockType });
+      const session = await refreshLoadedSession(id);
+      setSessionLookupId(session.sessionId);
+      setStatusMessage(`Regenerated ${blockType} block.`);
+    } catch (error: any) {
+      setStatusMessage(error.message || `Unable to regenerate ${blockType} block`);
+    } finally {
+      setIsRegeneratingBlock(false);
     }
   };
 
@@ -773,6 +820,26 @@ const App: React.FC = () => {
                   Send
                 </button>
               </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleStartListening}
+                  disabled={isListeningIntake}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  {isListeningIntake ? 'Listening...' : 'Use Mic (optional)'}
+                </button>
+                {loadedSession?.liveIntent?.missingFields && loadedSession.liveIntent.missingFields.length > 0 && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    Missing fields: {loadedSession.liveIntent.missingFields.join(', ')}
+                  </p>
+                )}
+                {typeof loadedSession?.liveIntent?.confidence === 'number' && (
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">
+                    Live intent confidence: {Math.round((loadedSession.liveIntent.confidence || 0) * 100)}%
+                  </p>
+                )}
+              </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <input
@@ -890,6 +957,16 @@ const App: React.FC = () => {
                         <a className="text-xs underline text-stone-600 dark:text-zinc-300 mt-1 inline-block" href={block.assetUrl} target="_blank" rel="noreferrer">
                           Open asset
                         </a>
+                      )}
+                      {(block.type === 'text' || block.type === 'narration' || block.type === 'caption' || block.type === 'cta') && (
+                        <button
+                          type="button"
+                          onClick={() => handleRegenerateStoryBlock(block.type as 'text' | 'narration' | 'caption' | 'cta')}
+                          disabled={isRegeneratingBlock}
+                          className="mt-2 px-2 py-1 rounded border border-stone-300 dark:border-zinc-700 text-[10px] font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                        >
+                          {isRegeneratingBlock ? 'Regenerating...' : 'Regenerate'}
+                        </button>
                       )}
                     </div>
                   ))}

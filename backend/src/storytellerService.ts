@@ -242,3 +242,28 @@ export async function buildStoryOutput(options: BuildStoryOptions): Promise<Stor
     nextAction: 'Review assets and trigger navigator execution to publish.',
   };
 }
+
+export async function regenerateStoryBlock(options: {
+  blockType: 'text' | 'narration' | 'caption' | 'cta';
+  title?: string;
+  goal: string;
+  liveIntent?: LiveIntent;
+}): Promise<{ title: string; content: string }> {
+  const narrative = await generateNarrativeFromGemini(options.goal, options.liveIntent);
+
+  if (options.blockType === 'narration') {
+    return { title: options.title || 'Voiceover', content: narrative.narration };
+  }
+  if (options.blockType === 'caption') {
+    return { title: options.title || 'Caption', content: narrative.caption };
+  }
+  if (options.blockType === 'cta') {
+    return { title: options.title || 'Call To Action', content: narrative.cta };
+  }
+
+  // "text" block regeneration defaults to script content.
+  return {
+    title: options.title || 'Script',
+    content: narrative.script,
+  };
+}

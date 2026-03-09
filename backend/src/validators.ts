@@ -26,6 +26,12 @@ export const generateStorySchema = z.object({
   generateAssets: z.boolean().optional(),
 });
 
+export const regenerateStoryBlockSchema = z.object({
+  sessionId: requiredString('sessionId', 120),
+  blockType: z.enum(['text', 'narration', 'caption', 'cta']),
+  title: z.string().trim().max(120, 'title is too long').optional(),
+});
+
 export const navigatorAnalyzeSchema = z.object({
   sessionId: requiredString('sessionId', 120),
   screenshotBase64: requiredString('screenshotBase64', 20000000),

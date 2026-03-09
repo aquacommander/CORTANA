@@ -11,6 +11,7 @@ This folder contains the workflow/session backend used by the frontend.
 - `POST /api/session/:sessionId/restart-from-review`
 - `POST /api/live/message`
 - `POST /api/story/generate`
+- `POST /api/story/regenerate-block`
 - `POST /api/navigator/analyze`
 - `POST /api/navigator/execute`
 
@@ -41,6 +42,8 @@ Optional safety guardrail:
 - `POST /api/story/generate` requires a ready live intent and returns a full
   mixed-media `StoryOutput` (summary, script, image block, video block,
   narration, caption, CTA).
+- `POST /api/story/regenerate-block` lets users refine one textual story block
+  (`text`, `narration`, `caption`, `cta`) without resetting the entire session.
 - Set `GEMINI_API_KEY` to enable backend Gemini text generation for storyline fields.
 
 ## Run
