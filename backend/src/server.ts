@@ -3,15 +3,15 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import {
   ExecutionResult,
-  LiveIntent,
   NavigatorPlan,
   Session,
-  StoryOutput,
   WorkflowStage,
 } from '../../frontend/shared/contracts.ts';
 import { analyzeNavigatorTarget } from './navigatorAnalyzer.ts';
 import { executeNavigatorPlan } from './navigatorExecutor.ts';
+import { processLiveMessage } from './liveAgentService.ts';
 import { SessionStore } from './sessionStore.ts';
+import { buildStoryOutput } from './storytellerService.ts';
 import {
   createSessionSchema,
   generateStorySchema,
@@ -170,17 +170,11 @@ app.post('/api/live/message', async (req, res) => {
     const { sessionId, message } = parsed.data;
 
     const session = getSessionOrThrow(sessionId);
-    const lowerMessage = message.toLowerCase();
-
-    const liveIntent: LiveIntent = {
-      intent: lowerMessage.includes('post') || lowerMessage.includes('publish') ? 'publish_story' : 'create_story',
-      objective: session.goal,
-      audience: lowerMessage.includes('kids') ? 'kids' : 'general audience',
-      tone: lowerMessage.includes('fun') ? 'playful' : 'cinematic',
-      platform: lowerMessage.includes('instagram') ? 'instagram' : 'web',
-      readyForStoryGeneration: message.length >= 5,
-      handoffTo: message.length >= 5 ? 'storyteller' : 'none',
-    };
+    const { liveIntent, reply } = processLiveMessage({
+      message,
+      goal: session.goal,
+      previousIntent: session.liveIntent,
+    });
 
     session.liveIntent = liveIntent;
     session.conversationSummary = `${session.conversationSummary} | User: ${message}`;
@@ -194,7 +188,7 @@ app.post('/api/live/message', async (req, res) => {
 
     return res.json({
       liveIntent,
-      reply: 'Intent captured. Story generation can begin.',
+      reply,
     });
   } catch (error: any) {
     return res.status(400).json({ error: error.message || 'Unable to process live message' });
@@ -207,21 +201,23 @@ app.post('/api/story/generate', async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
-    const { sessionId } = parsed.data;
+    const { sessionId, imageUrl, videoUrl } = parsed.data;
     const session = getSessionOrThrow(sessionId);
 
     ensureStage(session, 'STORY_GENERATION');
+    if (!session.liveIntent?.readyForStoryGeneration) {
+      return res.status(400).json({
+        error: 'Live intent is incomplete. Continue intake conversation before story generation.',
+      });
+    }
 
-    const storyOutput: StoryOutput = {
-      storyId: randomUUID(),
-      title: `Story for "${session.goal}"`,
-      blocks: [
-        { type: 'text', title: 'Hook', content: `Imagine: ${session.goal}` },
-        { type: 'caption', title: 'Caption', content: `Cinematic reveal of ${session.goal}` },
-        { type: 'cta', title: 'Call To Action', content: 'Try your own creative prompt next.' },
-      ],
-      nextAction: 'Review story, then run navigator analysis.',
-    };
+    const storyOutput = await buildStoryOutput({
+      sessionId: randomUUID(),
+      goal: session.goal,
+      liveIntent: session.liveIntent,
+      imageUrl,
+      videoUrl,
+    });
 
     session.storyOutput = storyOutput;
     appendLog(session, 'Story output generated');

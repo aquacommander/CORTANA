@@ -266,6 +266,9 @@ const App: React.FC = () => {
   const [isRefreshingSessions, setIsRefreshingSessions] = useState<boolean>(false);
   const [navigatorTargetUrl, setNavigatorTargetUrl] = useState<string>("");
   const [navigatorMode, setNavigatorMode] = useState<'mock' | 'playwright'>('mock');
+  const [intakeMessage, setIntakeMessage] = useState<string>("");
+  const [intakeTranscript, setIntakeTranscript] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [isSendingIntake, setIsSendingIntake] = useState<boolean>(false);
 
   const [inputText, setInputText] = useState<string>("");
   const [inputStyle, setInputStyle] = useState<string>("");
@@ -436,6 +439,44 @@ const App: React.FC = () => {
     }
   };
 
+  const handleSendIntakeMessage = async () => {
+    const message = intakeMessage.trim();
+    if (!message) return;
+    setIsSendingIntake(true);
+    try {
+      let activeSessionId = sessionId;
+      if (!activeSessionId) {
+        const { session } = await apiClient.createSession(message);
+        activeSessionId = session.sessionId;
+        setSessionId(session.sessionId);
+        setSessionLookupId(session.sessionId);
+      }
+      const response = await apiClient.sendLiveMessage({
+        sessionId: activeSessionId,
+        message,
+      });
+      setIntakeTranscript((prev) => [
+        ...prev,
+        { role: 'user', content: message },
+        { role: 'assistant', content: response.reply },
+      ]);
+      setIntakeMessage("");
+      setStatusMessage(response.reply);
+      if (response.liveIntent.readyForStoryGeneration) {
+        setWorkflowStageOverride('STORY_GENERATION');
+      } else {
+        setWorkflowStageOverride('INTAKE');
+      }
+      const session = await refreshLoadedSession(activeSessionId);
+      setSessionLookupId(session.sessionId);
+      await handleRefreshSessionList();
+    } catch (error: any) {
+      setStatusMessage(error.message || 'Unable to send intake message');
+    } finally {
+      setIsSendingIntake(false);
+    }
+  };
+
   const startProcess = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim()) return;
@@ -465,7 +506,18 @@ const App: React.FC = () => {
         setSessionId(session.sessionId);
       }
       if (activeSessionId) {
-        await apiClient.sendLiveMessage({ sessionId: activeSessionId, message: inputText });
+        const intakeResponse = await apiClient.sendLiveMessage({ sessionId: activeSessionId, message: inputText });
+        setIntakeTranscript((prev) => [
+          ...prev,
+          { role: 'user', content: inputText },
+          { role: 'assistant', content: intakeResponse.reply },
+        ]);
+        if (!intakeResponse.liveIntent.readyForStoryGeneration) {
+          setStatusMessage(intakeResponse.reply);
+          setState(AppState.IDLE);
+          setWorkflowStageOverride('INTAKE');
+          return;
+        }
         setWorkflowStageOverride('STORY_GENERATION');
       }
     } catch (backendError) {
@@ -484,15 +536,6 @@ const App: React.FC = () => {
       setState(AppState.GENERATING_VIDEO);
       setStatusMessage("Animating...");
 
-      if (activeSessionId) {
-        try {
-          await apiClient.generateStory({ sessionId: activeSessionId });
-          setWorkflowStageOverride('STORY_REVIEW');
-        } catch (backendError) {
-          console.warn('Failed to sync STORY_REVIEW stage.', backendError);
-        }
-      }
-      
       const videoUrl = await generateTextVideo(inputText, b64Image, mimeType, styleToUse);
       setVideoSrc(videoUrl);
       setState(AppState.PLAYING);
@@ -500,6 +543,11 @@ const App: React.FC = () => {
 
       if (activeSessionId) {
         try {
+          await apiClient.generateStory({
+            sessionId: activeSessionId,
+            imageUrl: `data:${mimeType};base64,${b64Image}`,
+          });
+          setWorkflowStageOverride('STORY_REVIEW');
           await apiClient.analyzeNavigator({
             sessionId: activeSessionId,
             screenshotBase64: b64Image,
@@ -545,6 +593,7 @@ const App: React.FC = () => {
     setWorkflowStageOverride(null);
     setLoadedSession(null);
     setSessionLookupId("");
+      setIntakeTranscript([]);
   };
 
   const handleDownload = () => {
@@ -649,6 +698,37 @@ const App: React.FC = () => {
         <form onSubmit={startProcess} className="space-y-6">
           <div className="rounded-xl border border-stone-200 dark:border-zinc-800 bg-stone-50 dark:bg-zinc-900 p-4 space-y-3">
             <p className="text-xs font-bold uppercase tracking-wide text-stone-500 dark:text-zinc-400">Session Controls</p>
+            <div className="space-y-2">
+              <p className="text-[11px] font-semibold text-stone-500 dark:text-zinc-400 uppercase tracking-wide">Live Intake Agent</p>
+              <div className="max-h-28 overflow-y-auto bg-white dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 rounded-lg p-2 space-y-1">
+                {intakeTranscript.length === 0 && (
+                  <p className="text-xs text-stone-400 dark:text-zinc-500">No intake messages yet. Send your campaign request to begin.</p>
+                )}
+                {intakeTranscript.slice(-6).map((msg, idx) => (
+                  <p key={idx} className={`text-xs ${msg.role === 'user' ? 'text-stone-700 dark:text-zinc-200' : 'text-stone-500 dark:text-zinc-400'}`}>
+                    <span className="font-semibold">{msg.role === 'user' ? 'You:' : 'Agent:'}</span> {msg.content}
+                  </p>
+                ))}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                <input
+                  type="text"
+                  value={intakeMessage}
+                  onChange={(e) => setIntakeMessage(e.target.value)}
+                  placeholder="Tell the live agent your campaign objective..."
+                  className="md:col-span-3 w-full bg-white dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-sm text-stone-900 dark:text-white"
+                />
+                <button
+                  type="button"
+                  onClick={handleSendIntakeMessage}
+                  disabled={!intakeMessage.trim() || isSendingIntake}
+                  className="px-4 py-2 rounded-lg border border-stone-300 dark:border-zinc-700 text-sm font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isSendingIntake ? <Loader2 size={14} className="animate-spin" /> : null}
+                  Send
+                </button>
+              </div>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <input
                 type="text"
@@ -749,6 +829,26 @@ const App: React.FC = () => {
                     )}
                   </div>
                 )}
+              </div>
+            )}
+            {loadedSession?.storyOutput && (
+              <div className="space-y-2 border-t border-stone-200 dark:border-zinc-800 pt-2">
+                <p className="text-[11px] font-semibold text-stone-500 dark:text-zinc-400 uppercase tracking-wide">Story Output</p>
+                <p className="text-xs font-semibold text-stone-700 dark:text-zinc-200">{loadedSession.storyOutput.title}</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {loadedSession.storyOutput.blocks.map((block, idx) => (
+                    <div key={`${block.type}-${idx}`} className="rounded-lg border border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-2">
+                      <p className="text-[10px] uppercase tracking-wide text-stone-400 dark:text-zinc-500">{block.type}</p>
+                      <p className="text-xs font-semibold text-stone-700 dark:text-zinc-200">{block.title}</p>
+                      {block.content && <p className="text-xs text-stone-500 dark:text-zinc-400 mt-1">{block.content}</p>}
+                      {block.assetUrl && (
+                        <a className="text-xs underline text-stone-600 dark:text-zinc-300 mt-1 inline-block" href={block.assetUrl} target="_blank" rel="noreferrer">
+                          Open asset
+                        </a>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>

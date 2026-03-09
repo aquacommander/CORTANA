@@ -34,6 +34,15 @@ Optional safety guardrail:
 - `NAVIGATOR_ALLOWED_HOSTS=example.com,localhost`
 - When set, both analyze and execute reject non-allowed hosts.
 
+## Storyteller + Live Agent Notes
+
+- `POST /api/live/message` now runs a follow-up intake loop and only marks
+  `readyForStoryGeneration=true` after objective/audience/tone/platform are captured.
+- `POST /api/story/generate` requires a ready live intent and returns a full
+  mixed-media `StoryOutput` (summary, script, image block, video block,
+  narration, caption, CTA).
+- Set `GEMINI_API_KEY` to enable backend Gemini text generation for storyline fields.
+
 ## Run
 
 1. `npm install`
