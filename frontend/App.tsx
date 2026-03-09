@@ -254,6 +254,8 @@ const App: React.FC = () => {
   const [sessionLookupId, setSessionLookupId] = useState<string>("");
   const [loadedSession, setLoadedSession] = useState<Session | null>(null);
   const [isLoadingSession, setIsLoadingSession] = useState<boolean>(false);
+  const [isRestartingSession, setIsRestartingSession] = useState<boolean>(false);
+  const [isRerunningNavigator, setIsRerunningNavigator] = useState<boolean>(false);
   const [navigatorTargetUrl, setNavigatorTargetUrl] = useState<string>("");
   const [navigatorMode, setNavigatorMode] = useState<'mock' | 'playwright'>('mock');
 
@@ -320,23 +322,74 @@ const App: React.FC = () => {
     }
   };
 
+  const refreshLoadedSession = async (id: string) => {
+    const { session } = await apiClient.getSession(id);
+    setLoadedSession(session);
+    setSessionId(session.sessionId);
+    setWorkflowStageOverride(session.workflowStage);
+    setNavigatorTargetUrl(session.navigatorTargetUrl || "");
+    return session;
+  };
+
   const handleLoadSession = async () => {
     const id = sessionLookupId.trim();
     if (!id) return;
     setIsLoadingSession(true);
     try {
-      const { session } = await apiClient.getSession(id);
-      setLoadedSession(session);
-      setSessionId(session.sessionId);
-      setWorkflowStageOverride(session.workflowStage);
+      const session = await refreshLoadedSession(id);
       setStatusMessage(`Loaded session: ${session.status}`);
-      setNavigatorTargetUrl(session.navigatorTargetUrl || "");
       setViewMode('create');
     } catch (error: any) {
       setStatusMessage(error.message || 'Unable to load session');
       setLoadedSession(null);
     } finally {
       setIsLoadingSession(false);
+    }
+  };
+
+  const handleRestartFromReview = async () => {
+    const id = (loadedSession?.sessionId || sessionId || sessionLookupId).trim();
+    if (!id) return;
+    setIsRestartingSession(true);
+    try {
+      const { session } = await apiClient.restartSessionFromReview(id);
+      setLoadedSession(session);
+      setSessionId(session.sessionId);
+      setWorkflowStageOverride(session.workflowStage);
+      setSessionLookupId(session.sessionId);
+      setStatusMessage('Session restarted from STORY_REVIEW');
+      setViewMode('create');
+    } catch (error: any) {
+      setStatusMessage(error.message || 'Unable to restart session');
+    } finally {
+      setIsRestartingSession(false);
+    }
+  };
+
+  const handleRerunNavigator = async () => {
+    const id = (loadedSession?.sessionId || sessionId || sessionLookupId).trim();
+    if (!id) return;
+    setIsRerunningNavigator(true);
+    try {
+      await apiClient.analyzeNavigator({
+        sessionId: id,
+        screenshotBase64: referenceImage ? referenceImage.split(',')[1] || 'ZmFrZQ==' : 'ZmFrZQ==',
+        targetUrl: navigatorTargetUrl.trim() || undefined,
+      });
+      setWorkflowStageOverride('NAVIGATOR_ANALYSIS');
+      const { executionResult } = await apiClient.executeNavigator({
+        sessionId: id,
+        mode: navigatorMode,
+        targetUrl: navigatorTargetUrl.trim() || undefined,
+        headless: true,
+      });
+      const session = await refreshLoadedSession(id);
+      setStatusMessage(`Re-run finished with status: ${executionResult.status}`);
+      setSessionLookupId(session.sessionId);
+    } catch (error: any) {
+      setStatusMessage(error.message || 'Navigator re-run failed');
+    } finally {
+      setIsRerunningNavigator(false);
     }
   };
 
@@ -420,8 +473,8 @@ const App: React.FC = () => {
           if (executionResult.status !== 'success') {
             setStatusMessage(`Execution finished with status: ${executionResult.status}`);
           }
-          const { session } = await apiClient.getSession(activeSessionId);
-          setLoadedSession(session);
+          const session = await refreshLoadedSession(activeSessionId);
+          setSessionLookupId(session.sessionId);
         } catch (backendError) {
           console.warn('Failed to sync navigator workflow stages.', backendError);
         }
@@ -448,6 +501,7 @@ const App: React.FC = () => {
     setSessionId(null);
     setWorkflowStageOverride(null);
     setLoadedSession(null);
+    setSessionLookupId("");
   };
 
   const handleDownload = () => {
@@ -587,10 +641,38 @@ const App: React.FC = () => {
                 <option value="playwright">Navigator Mode: playwright</option>
               </select>
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={handleRestartFromReview}
+                disabled={isRestartingSession || !(loadedSession?.sessionId || sessionId || sessionLookupId).trim()}
+                className="px-4 py-2 rounded-lg border border-stone-300 dark:border-zinc-700 text-sm font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isRestartingSession ? <Loader2 size={14} className="animate-spin" /> : null}
+                Restart From Review
+              </button>
+              <button
+                type="button"
+                onClick={handleRerunNavigator}
+                disabled={isRerunningNavigator || !(loadedSession?.sessionId || sessionId || sessionLookupId).trim()}
+                className="px-4 py-2 rounded-lg bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 text-sm font-semibold hover:bg-stone-800 dark:hover:bg-white disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isRerunningNavigator ? <Loader2 size={14} className="animate-spin" /> : null}
+                Re-run Navigator
+              </button>
+            </div>
             {loadedSession && (
-              <p className="text-xs text-stone-600 dark:text-zinc-300">
-                Loaded {loadedSession.sessionId} | stage: {loadedSession.workflowStage} | status: {loadedSession.status} | logs: {loadedSession.logs.length}
-              </p>
+              <div className="text-xs text-stone-600 dark:text-zinc-300 space-y-1">
+                <p>
+                  Loaded {loadedSession.sessionId} | stage: {loadedSession.workflowStage} | status: {loadedSession.status} | logs: {loadedSession.logs.length}
+                </p>
+                {loadedSession.executionResult && (
+                  <p>
+                    Last execution: {loadedSession.executionResult.status} | completed actions: {loadedSession.executionResult.completedActions}
+                    {loadedSession.executionResult.error ? ` | error: ${loadedSession.executionResult.error}` : ''}
+                  </p>
+                )}
+              </div>
             )}
           </div>
 
