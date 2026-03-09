@@ -546,6 +546,7 @@ const App: React.FC = () => {
           await apiClient.generateStory({
             sessionId: activeSessionId,
             imageUrl: `data:${mimeType};base64,${b64Image}`,
+            videoUrl,
           });
           setWorkflowStageOverride('STORY_REVIEW');
           await apiClient.analyzeNavigator({

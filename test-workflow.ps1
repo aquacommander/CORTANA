@@ -82,6 +82,12 @@ $storyResponse = Invoke-Json "POST" "$BaseUrl/api/story/generate" @{ sessionId =
 $story = $storyResponse.storyOutput
 Assert-True (-not [string]::IsNullOrWhiteSpace($story.storyId)) "Story generation id" ("storyId=" + $story.storyId)
 Assert-True ($story.blocks.Count -ge 3) "Story generation blocks" ("blocks=" + $story.blocks.Count)
+$narrationBlocks = @($story.blocks | Where-Object { $_.type -eq "narration" })
+$captionBlocks = @($story.blocks | Where-Object { $_.type -eq "caption" })
+$ctaBlocks = @($story.blocks | Where-Object { $_.type -eq "cta" })
+Assert-True ($narrationBlocks.Count -ge 1) "Story block includes narration" "narration=true"
+Assert-True ($captionBlocks.Count -ge 1) "Story block includes caption" "caption=true"
+Assert-True ($ctaBlocks.Count -ge 1) "Story block includes cta" "cta=true"
 
 # Test 6: Validation - analyze missing screenshot
 $analyzeNoScreenshotError = Get-ErrorBody {
