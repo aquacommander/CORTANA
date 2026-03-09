@@ -19,6 +19,27 @@ interface Video {
 
 const staticFilesUrl = 'https://www.gstatic.com/aistudio/starter-apps/type-motion/';
 
+type AiStudioBridge = {
+  hasSelectedApiKey?: () => Promise<boolean>;
+  openSelectKey?: () => Promise<void>;
+};
+
+const getConfiguredApiKey = (): string => (process.env.API_KEY || "").trim();
+
+const hasConfiguredApiKey = (): boolean => getConfiguredApiKey().length > 0;
+
+const getAiStudioBridge = (): AiStudioBridge | undefined => (window as any).aistudio;
+
+const hasAnyUsableApiKey = async (): Promise<boolean> => {
+  if (hasConfiguredApiKey()) return true;
+
+  const bridge = getAiStudioBridge();
+  if (bridge?.hasSelectedApiKey) {
+    return Boolean(await bridge.hasSelectedApiKey());
+  }
+  return false;
+};
+
 export const MOCK_VIDEOS: Video[] = [
   {
     id: '1',
@@ -46,7 +67,7 @@ export const MOCK_VIDEOS: Video[] = [
   },
 ];
 
-const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: () => void }> = ({ isOpen, onClose, onSelect }) => {
+const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: () => void; canUseAiStudio: boolean }> = ({ isOpen, onClose, onSelect, canUseAiStudio }) => {
   if (!isOpen) return null;
 
   return (
@@ -56,9 +77,9 @@ const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: (
           <div className="w-12 h-12 bg-amber-100 dark:bg-amber-900/30 rounded-xl flex items-center justify-center mb-4">
             <Key className="text-amber-600 dark:text-amber-500" size={24} />
           </div>
-          <h2 className="text-xl font-bold text-stone-900 dark:text-white mb-2">Paid API Key Required</h2>
+          <h2 className="text-xl font-bold text-stone-900 dark:text-white mb-2">Gemini API Key Required</h2>
           <p className="text-stone-500 dark:text-stone-400 text-sm leading-relaxed mb-6">
-            To use cinematic video generation models (like Veo), you must select an API key from a Google Cloud project with 
+            To use cinematic video generation models (like Veo), you must provide an API key from a Google Cloud project with 
             <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer" className="text-stone-900 dark:text-stone-100 underline decoration-stone-300 hover:decoration-stone-900 font-medium ml-1">billing enabled</a>. 
             Free-tier keys do not support these high-end features.
           </p>
@@ -68,6 +89,7 @@ const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: (
               <div className="text-xs text-stone-500 dark:text-stone-400 space-y-2">
                 <p>• Make sure your project is linked to a valid billing account.</p>
                 <p>• Check the <a href="https://ai.google.dev/pricing" target="_blank" rel="noopener noreferrer" className="underline">pricing documentation</a> for more details.</p>
+                {!canUseAiStudio && <p>• Set `GEMINI_API_KEY` in `.env.local` and restart the app.</p>}
               </div>
             </div>
           </div>
@@ -83,7 +105,7 @@ const ApiKeyDialog: React.FC<{ isOpen: boolean; onClose: () => void; onSelect: (
               onClick={onSelect}
               className="flex-1 py-3 px-4 bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 rounded-xl text-sm font-bold shadow-lg shadow-stone-900/10 hover:bg-stone-800 dark:hover:bg-white transition-all flex items-center justify-center gap-2"
             >
-              Select API Key
+              {canUseAiStudio ? 'Select API Key' : 'Open Setup Guide'}
             </button>
           </div>
         </div>
@@ -172,6 +194,7 @@ const App: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string>("");
   const [isGifGenerating, setIsGifGenerating] = useState<boolean>(false);
   const [isSuggestingStyle, setIsSuggestingStyle] = useState<boolean>(false);
+  const canUseAiStudio = Boolean(getAiStudioBridge()?.openSelectKey);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -183,17 +206,21 @@ const App: React.FC = () => {
 
   const handleSelectKey = async () => {
     setShowKeyDialog(false);
-    if (window.aistudio && window.aistudio.openSelectKey) {
-      await window.aistudio.openSelectKey();
+    const bridge = getAiStudioBridge();
+    if (bridge?.openSelectKey) {
+      await bridge.openSelectKey();
       // Assume selection success to avoid delay
       if (state === AppState.IDLE && viewMode === 'gallery') {
          setViewMode('create');
       }
+      return;
     }
+
+    window.open('https://ai.google.dev/gemini-api/docs/api-key', '_blank', 'noopener,noreferrer');
   };
 
   const handleMainCta = async () => {
-    const isKeySelected = await window.aistudio?.hasSelectedApiKey();
+    const isKeySelected = await hasAnyUsableApiKey();
     if (!isKeySelected) {
       setShowKeyDialog(true);
     } else {
@@ -207,7 +234,7 @@ const App: React.FC = () => {
     if (!inputText.trim()) return;
 
     // Final key check before spending tokens
-    const keySelected = await window.aistudio?.hasSelectedApiKey();
+    const keySelected = await hasAnyUsableApiKey();
     if (!keySelected) {
       setShowKeyDialog(true);
       return;
@@ -455,7 +482,7 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen w-full flex flex-col bg-stone-50 dark:bg-zinc-950 text-stone-900 dark:text-stone-100 font-sans transition-colors duration-500 overflow-x-hidden selection:bg-stone-900 selection:text-white dark:selection:bg-white dark:selection:text-stone-900">
-      <ApiKeyDialog isOpen={showKeyDialog} onClose={() => setShowKeyDialog(false)} onSelect={handleSelectKey} />
+      <ApiKeyDialog isOpen={showKeyDialog} onClose={() => setShowKeyDialog(false)} onSelect={handleSelectKey} canUseAiStudio={canUseAiStudio} />
       
       <div className="flex-1 flex items-center justify-center p-4 lg:p-6 overflow-hidden">
         <div className={`transition-all duration-1000 ease-[cubic-bezier(0.25,0.8,0.25,1)] w-full flex flex-col lg:flex-row items-center justify-center ${isFlip ? 'max-w-6xl gap-0 lg:gap-0' : 'max-w-7xl gap-8 lg:gap-16'}`}>
