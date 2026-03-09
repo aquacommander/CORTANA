@@ -261,6 +261,7 @@ const App: React.FC = () => {
   const [isLoadingSession, setIsLoadingSession] = useState<boolean>(false);
   const [isRestartingSession, setIsRestartingSession] = useState<boolean>(false);
   const [isRerunningNavigator, setIsRerunningNavigator] = useState<boolean>(false);
+  const [isRealtimeConnecting, setIsRealtimeConnecting] = useState<boolean>(false);
   const [recentSessions, setRecentSessions] = useState<Array<{
     sessionId: string;
     goal: string;
@@ -284,6 +285,9 @@ const App: React.FC = () => {
   const [inputStyle, setInputStyle] = useState<string>("");
   const [typographyPrompt, setTypographyPrompt] = useState<string>("");
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
+  const [screenRecording, setScreenRecording] = useState<string | null>(null);
+  const [useRealtimeLive, setUseRealtimeLive] = useState<boolean>(false);
+  const [liveRealtimeSessionId, setLiveRealtimeSessionId] = useState<string | null>(null);
 
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
@@ -297,6 +301,7 @@ const App: React.FC = () => {
     : getWorkflowViewState(viewMode, state);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const recordingInputRef = useRef<HTMLInputElement>(null);
   const intakeAbortRef = useRef<AbortController | null>(null);
   const intakeRecognitionRef = useRef<any>(null);
 
@@ -444,6 +449,7 @@ const App: React.FC = () => {
       await apiClient.analyzeNavigator({
         sessionId: id,
         screenshotBase64: referenceImage ? referenceImage.split(',')[1] || 'ZmFrZQ==' : 'ZmFrZQ==',
+        screenRecordingBase64: screenRecording ? screenRecording.split(',')[1] || undefined : undefined,
         targetUrl: navigatorTargetUrl.trim() || undefined,
       });
       setWorkflowStageOverride('NAVIGATOR_ANALYSIS');
@@ -461,6 +467,41 @@ const App: React.FC = () => {
       setStatusMessage(error.message || 'Navigator re-run failed');
     } finally {
       setIsRerunningNavigator(false);
+    }
+  };
+
+  const handleStartRealtimeLive = async () => {
+    const id = (loadedSession?.sessionId || sessionId || sessionLookupId).trim();
+    if (!id) {
+      setStatusMessage('Load or create a session before starting realtime mode.');
+      return;
+    }
+    setIsRealtimeConnecting(true);
+    try {
+      const result = await apiClient.startRealtimeLiveSession({ sessionId: id });
+      setLiveRealtimeSessionId(result.liveSessionId);
+      setUseRealtimeLive(true);
+      setStatusMessage(`Realtime live session started (${result.mode}).`);
+    } catch (error: any) {
+      setStatusMessage(error.message || 'Unable to start realtime live session');
+    } finally {
+      setIsRealtimeConnecting(false);
+    }
+  };
+
+  const handleStopRealtimeLive = async () => {
+    if (!liveRealtimeSessionId) {
+      setUseRealtimeLive(false);
+      return;
+    }
+    try {
+      await apiClient.stopRealtimeLiveSession(liveRealtimeSessionId);
+    } catch {
+      // best effort stop
+    } finally {
+      setLiveRealtimeSessionId(null);
+      setUseRealtimeLive(false);
+      setStatusMessage('Realtime live session stopped.');
     }
   };
 
@@ -500,6 +541,15 @@ const App: React.FC = () => {
       };
 
       let response: { liveIntent: LiveIntent; reply: string };
+      let realtimeReply = '';
+      if (useRealtimeLive && liveRealtimeSessionId) {
+        try {
+          const rt = await apiClient.sendRealtimeLiveMessage(liveRealtimeSessionId, { message });
+          realtimeReply = rt.reply;
+        } catch {
+          // keep primary flow reliable even if realtime preview fails
+        }
+      }
       if (useStreamingReplies) {
         let aggregateReply = '';
         response = await apiClient.sendLiveMessageStream(
@@ -531,6 +581,12 @@ const App: React.FC = () => {
       }
 
       setStatusMessage(response.reply);
+      if (realtimeReply) {
+        setIntakeTranscript((prev) => [
+          ...prev,
+          { role: 'assistant', content: `[Realtime] ${realtimeReply}` },
+        ]);
+      }
       if (speakAgentReplies && 'speechSynthesis' in window) {
         try {
           window.speechSynthesis.cancel();
@@ -803,6 +859,7 @@ const App: React.FC = () => {
           await apiClient.analyzeNavigator({
             sessionId: activeSessionId,
             screenshotBase64,
+            screenRecordingBase64: screenRecording ? screenRecording.split(',')[1] || undefined : undefined,
             targetUrl: navigatorTargetUrl.trim() || undefined,
           });
           setWorkflowStageOverride('NAVIGATOR_ANALYSIS');
@@ -836,6 +893,9 @@ const App: React.FC = () => {
   };
 
   const reset = () => {
+    if (liveRealtimeSessionId) {
+      apiClient.stopRealtimeLiveSession(liveRealtimeSessionId).catch(() => undefined);
+    }
     setState(AppState.IDLE);
     setVideoSrc(null);
     setImageSrc(null);
@@ -844,7 +904,10 @@ const App: React.FC = () => {
     setWorkflowStageOverride(null);
     setLoadedSession(null);
     setSessionLookupId("");
-      setIntakeTranscript([]);
+    setIntakeTranscript([]);
+    setScreenRecording(null);
+    setLiveRealtimeSessionId(null);
+    setUseRealtimeLive(false);
   };
 
   const handleDownload = () => {
@@ -1028,6 +1091,22 @@ const App: React.FC = () => {
                   className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800"
                 >
                   {speakAgentReplies ? 'Agent Voice: On' : 'Agent Voice: Off'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStartRealtimeLive}
+                  disabled={isRealtimeConnecting}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  {isRealtimeConnecting ? 'Connecting...' : (useRealtimeLive ? 'Realtime: On' : 'Realtime: Off')}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStopRealtimeLive}
+                  disabled={!useRealtimeLive}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Stop Realtime
                 </button>
                 {loadedSession?.liveIntent?.missingFields && loadedSession.liveIntent.missingFields.length > 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -1273,6 +1352,35 @@ const App: React.FC = () => {
                         <X size={12} className="text-white" />
                        </button>
                     </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => recordingInputRef.current?.click()}
+                    className="flex-1 border border-dashed border-stone-300 dark:border-zinc-700 rounded-xl h-10 flex items-center justify-center gap-2 text-stone-500 dark:text-zinc-400 hover:bg-stone-50 dark:hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-stone-900 dark:focus:ring-stone-100 cursor-pointer text-xs transition-all"
+                    aria-label="Upload screen recording"
+                  >
+                    <Upload size={14} /> Upload Screen Recording
+                  </button>
+                  <input
+                    type="file"
+                    ref={recordingInputRef}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (file) setScreenRecording(await fileToBase64(file));
+                    }}
+                    accept="video/*"
+                    className="sr-only"
+                  />
+                  {screenRecording && (
+                    <button
+                      type="button"
+                      onClick={() => setScreenRecording(null)}
+                      className="h-10 px-3 rounded-xl border border-stone-200 dark:border-zinc-700 text-xs text-stone-500 dark:text-zinc-400 hover:bg-stone-50 dark:hover:bg-zinc-800"
+                    >
+                      Remove video
+                    </button>
                   )}
                 </div>
                 <p className="text-[10px] leading-relaxed text-stone-400 dark:text-zinc-500 mt-3 border-t border-stone-100 dark:border-zinc-900 pt-3">

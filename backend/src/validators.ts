@@ -16,6 +16,14 @@ export const liveMessageSchema = z.object({
   screenshotBase64: z.string().trim().max(20000000, 'screenshotBase64 is too long').optional(),
 });
 
+export const liveRealtimeStartSchema = z.object({
+  sessionId: requiredString('sessionId', 120),
+});
+
+export const liveRealtimeMessageSchema = z.object({
+  message: requiredString('message', 5000),
+});
+
 export const generateStorySchema = z.object({
   sessionId: requiredString('sessionId', 120),
   text: z.string().trim().max(2000, 'text is too long').optional(),
@@ -38,6 +46,7 @@ export const regenerateStoryBlockSchema = z.object({
 export const navigatorAnalyzeSchema = z.object({
   sessionId: requiredString('sessionId', 120),
   screenshotBase64: requiredString('screenshotBase64', 20000000),
+  screenRecordingBase64: z.string().trim().max(60000000, 'screenRecordingBase64 is too long').optional(),
   targetUrl: z.string().trim().url('targetUrl must be a valid URL').optional(),
 });
 

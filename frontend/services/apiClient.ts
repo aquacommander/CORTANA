@@ -211,10 +211,27 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
 
-  analyzeNavigator: (payload: { sessionId: string; screenshotBase64: string; targetUrl?: string }) =>
+  analyzeNavigator: (payload: { sessionId: string; screenshotBase64: string; screenRecordingBase64?: string; targetUrl?: string }) =>
     request<{ navigatorPlan: NavigatorPlan }>('/navigator/analyze', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  startRealtimeLiveSession: (payload: { sessionId: string }) =>
+    request<{ liveSessionId: string; mode: string }>('/live/realtime/session/start', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  sendRealtimeLiveMessage: (liveSessionId: string, payload: { message: string }) =>
+    request<{ reply: string }>(`/live/realtime/session/${liveSessionId}/message`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  stopRealtimeLiveSession: (liveSessionId: string) =>
+    request<{ stopped: boolean; liveSessionId: string }>(`/live/realtime/session/${liveSessionId}/stop`, {
+      method: 'POST',
     }),
 
   executeNavigator: (payload: { sessionId: string; mode?: 'mock' | 'playwright'; targetUrl?: string; headless?: boolean }) =>
