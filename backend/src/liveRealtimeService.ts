@@ -7,6 +7,8 @@ type LiveSessionRecord = {
   startedAt: string;
   provider: 'gemini_live' | 'adk_compatible' | 'genai_fallback';
   liveConnection?: any;
+  adkEndpoint?: string;
+  fallbackReason?: string;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
 };
 
@@ -15,6 +17,8 @@ const liveSessions = new Map<string, LiveSessionRecord>();
 const REALTIME_PROVIDER = ((process.env.LIVE_AGENT_PROVIDER || '').trim().toLowerCase() ||
   'gemini_live') as 'gemini_live' | 'adk_compatible' | 'genai_fallback';
 const LIVE_MODEL = (process.env.GEMINI_LIVE_MODEL || '').trim() || 'gemini-live-2.5-flash-preview';
+const ADK_ENDPOINT = (process.env.ADK_ENDPOINT || '').trim();
+const LIVE_STRICT = (process.env.LIVE_AGENT_STRICT || '').trim().toLowerCase() === 'true';
 
 async function getAI(): Promise<any | null> {
   const key = (process.env.GEMINI_API_KEY || '').trim();
@@ -48,12 +52,35 @@ export async function startRealtimeSession(input: { sessionId: string; goal: str
   const ai = await getAI();
   let liveConnection: any | undefined;
   let provider: LiveSessionRecord['provider'] = 'genai_fallback';
+  let fallbackReason = '';
 
   if (REALTIME_PROVIDER === 'gemini_live' && ai) {
     liveConnection = await tryOpenGeminiLiveConnection(ai, { goal: input.goal });
-    provider = liveConnection ? 'gemini_live' : 'genai_fallback';
+    if (liveConnection) {
+      provider = 'gemini_live';
+    } else {
+      provider = 'genai_fallback';
+      fallbackReason = 'Gemini live connection unavailable in current runtime.';
+      if (LIVE_STRICT) {
+        throw new Error('LIVE_AGENT_STRICT=true and Gemini Live connection could not be established.');
+      }
+    }
   } else if (REALTIME_PROVIDER === 'adk_compatible') {
-    provider = 'adk_compatible';
+    if (!ADK_ENDPOINT) {
+      provider = 'genai_fallback';
+      fallbackReason = 'ADK provider selected but ADK_ENDPOINT is not configured.';
+      if (LIVE_STRICT) {
+        throw new Error('LIVE_AGENT_STRICT=true and ADK_ENDPOINT is missing for adk_compatible mode.');
+      }
+    } else {
+      provider = 'adk_compatible';
+    }
+  } else if (REALTIME_PROVIDER === 'gemini_live' && !ai) {
+    provider = 'genai_fallback';
+    fallbackReason = 'Gemini API key not configured for live runtime.';
+    if (LIVE_STRICT) {
+      throw new Error('LIVE_AGENT_STRICT=true and GEMINI_API_KEY is missing for gemini_live mode.');
+    }
   }
 
   liveSessions.set(liveSessionId, {
@@ -63,12 +90,15 @@ export async function startRealtimeSession(input: { sessionId: string; goal: str
     startedAt: new Date().toISOString(),
     provider,
     liveConnection,
+    adkEndpoint: ADK_ENDPOINT || undefined,
+    fallbackReason: fallbackReason || undefined,
     history: [],
   });
   return {
     liveSessionId,
     mode: provider,
     model: LIVE_MODEL,
+    fallbackReason: fallbackReason || undefined,
   };
 }
 
@@ -123,6 +153,26 @@ async function trySendViaLiveConnection(connection: any, message: string): Promi
   return undefined;
 }
 
+async function sendViaAdkEndpoint(endpoint: string, message: string, goal: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        goal,
+        mode: 'realtime',
+      }),
+    });
+    if (!response.ok) return undefined;
+    const json = await response.json() as any;
+    const text = String(json?.reply || json?.text || '').trim();
+    return text || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function sendRealtimeMessage(liveSessionId: string, message: string): Promise<string> {
   const record = liveSessions.get(liveSessionId);
   if (!record) {
@@ -136,6 +186,18 @@ export async function sendRealtimeMessage(liveSessionId: string, message: string
       record.history.push({ role: 'user', content: message });
       record.history.push({ role: 'assistant', content: liveText });
       return liveText;
+    }
+  }
+
+  if (record.provider === 'adk_compatible' && record.adkEndpoint) {
+    const adkText = await sendViaAdkEndpoint(record.adkEndpoint, message, record.goal);
+    if (adkText) {
+      record.history.push({ role: 'user', content: message });
+      record.history.push({ role: 'assistant', content: adkText });
+      return adkText;
+    }
+    if (LIVE_STRICT) {
+      throw new Error('LIVE_AGENT_STRICT=true and ADK endpoint did not return a realtime reply.');
     }
   }
 
@@ -172,4 +234,14 @@ export async function sendRealtimeMessage(liveSessionId: string, message: string
   record.history.push({ role: 'user', content: message });
   record.history.push({ role: 'assistant', content: finalText });
   return finalText;
+}
+
+export function getRealtimeProviderMatrix() {
+  return {
+    activeProvider: REALTIME_PROVIDER,
+    liveModel: LIVE_MODEL,
+    strictMode: LIVE_STRICT,
+    adkEndpointConfigured: Boolean(ADK_ENDPOINT),
+    supportedProviders: ['gemini_live', 'adk_compatible', 'genai_fallback'],
+  };
 }

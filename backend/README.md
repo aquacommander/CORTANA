@@ -14,6 +14,7 @@ This folder contains the workflow/session backend used by the frontend.
 - `POST /api/live/realtime/session/start`
 - `POST /api/live/realtime/session/:liveSessionId/message`
 - `POST /api/live/realtime/session/:liveSessionId/stop`
+- `GET /api/live/realtime/provider-matrix`
 - `POST /api/story/generate`
 - `POST /api/story/generate-stream`
 - `POST /api/story/regenerate-block`
@@ -49,6 +50,8 @@ Optional safety guardrail:
 - Realtime session endpoints support provider modes via env:
   - `LIVE_AGENT_PROVIDER=gemini_live|adk_compatible|genai_fallback`
   - `GEMINI_LIVE_MODEL` (default: `gemini-live-2.5-flash-preview`)
+  - `LIVE_AGENT_STRICT=true|false`
+  - `ADK_ENDPOINT` (required for `adk_compatible` mode)
   The backend attempts a live connection when available and gracefully falls back.
 - Storyteller interleaved-first mode:
   - `INTERLEAVED_MODEL` (default: `gemini-2.5-flash`)

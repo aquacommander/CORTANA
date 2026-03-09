@@ -12,6 +12,7 @@ import { executeNavigatorPlan } from './navigatorExecutor.ts';
 import { getKnowledgeContext } from './knowledgeService.ts';
 import { processLiveMessage } from './liveAgentService.ts';
 import {
+  getRealtimeProviderMatrix,
   hasRealtimeSession,
   sendRealtimeMessage,
   startRealtimeSession,
@@ -283,6 +284,10 @@ app.post('/api/live/realtime/session/:liveSessionId/stop', async (req, res) => {
   return res.json({ stopped: true, liveSessionId });
 });
 
+app.get('/api/live/realtime/provider-matrix', (_req, res) => {
+  return res.json(getRealtimeProviderMatrix());
+});
+
 app.post('/api/story/generate', async (req, res) => {
   try {
     const parsed = generateStorySchema.safeParse(req.body || {});
@@ -481,6 +486,7 @@ app.post('/api/navigator/analyze', async (req, res) => {
             cta: session.storyOutput.blocks.find((block) => block.type === 'cta')?.content,
             imageAssetUrl: session.storyOutput.blocks.find((block) => block.type === 'image')?.assetUrl,
             videoAssetUrl: session.storyOutput.blocks.find((block) => block.type === 'video')?.assetUrl,
+            platform: session.liveIntent?.platform,
           }
         : undefined,
     });
