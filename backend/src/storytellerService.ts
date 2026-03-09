@@ -13,6 +13,19 @@ type BuildStoryOptions = {
   generateAssets?: boolean;
 };
 
+type InterleavedPlan = {
+  title: string;
+  summary: string;
+  script: string;
+  narration: string;
+  caption: string;
+  cta: string;
+  imagePrompt?: string;
+  videoPrompt?: string;
+  generationPath: 'interleaved_native' | 'fallback_orchestrated';
+  fallbackReason?: string;
+};
+
 async function getAI(): Promise<any | null> {
   const key = (process.env.GEMINI_API_KEY || '').trim();
   if (!key) return null;
@@ -30,6 +43,7 @@ async function generateImageAsset(options: {
   style?: string;
   typographyPrompt?: string;
   referenceImage?: string;
+  imagePrompt?: string;
 }): Promise<string | undefined> {
   const ai = await getAI();
   if (!ai) return undefined;
@@ -47,7 +61,7 @@ async function generateImageAsset(options: {
     }
   }
   parts.push({
-    text: `Create a cinematic campaign key visual for "${options.goal}".
+    text: `${options.imagePrompt || `Create a cinematic campaign key visual for "${options.goal}".`}
 Audience: ${options.liveIntent?.audience || 'general audience'}
 Tone: ${options.liveIntent?.tone || 'cinematic'}
 Platform: ${options.liveIntent?.platform || 'web'}
@@ -84,6 +98,7 @@ async function generateVideoAsset(options: {
   liveIntent?: LiveIntent;
   style?: string;
   imageDataUrl?: string;
+  videoPrompt?: string;
 }): Promise<string | undefined> {
   const ai = await getAI();
   if (!ai) return undefined;
@@ -91,7 +106,7 @@ async function generateVideoAsset(options: {
   try {
     const op = await ai.models.generateVideos({
       model: 'veo-3.1-fast-generate-preview',
-      prompt: `Create a short cinematic promotional video for "${options.goal}".
+      prompt: `${options.videoPrompt || `Create a short cinematic promotional video for "${options.goal}".`}
 Audience: ${options.liveIntent?.audience || 'general audience'}
 Tone: ${options.liveIntent?.tone || 'cinematic'}
 Platform: ${options.liveIntent?.platform || 'web'}
@@ -181,8 +196,102 @@ Output only valid JSON.
   }
 }
 
+function tryParseJson(raw: string): any | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function generateInterleavedPlan(
+  goal: string,
+  liveIntent?: LiveIntent,
+  guidanceContext?: string,
+): Promise<InterleavedPlan> {
+  const ai = await getAI();
+  if (!ai) {
+    const fallback = await generateNarrativeFromGemini(goal, liveIntent, guidanceContext);
+    return {
+      ...fallback,
+      imagePrompt: `Create key visual for ${goal}`,
+      videoPrompt: `Create short promo clip for ${goal}`,
+      generationPath: 'fallback_orchestrated',
+      fallbackReason: 'No Gemini key configured for interleaved generation.',
+    };
+  }
+
+  const interleavedModel = (process.env.INTERLEAVED_MODEL || '').trim() || 'gemini-2.5-flash';
+  const prompt = `
+You are a multimodal creative director.
+Create a cohesive campaign package and return ONLY valid JSON with keys:
+title, summary, script, narration, caption, cta, imagePrompt, videoPrompt
+
+Goal: ${goal}
+Audience: ${liveIntent?.audience || 'general audience'}
+Tone: ${liveIntent?.tone || 'cinematic'}
+Platform: ${liveIntent?.platform || 'web'}
+Objective: ${liveIntent?.objective || goal}
+Needs: ${(liveIntent?.needs || []).join(', ') || 'not specified'}
+Interests: ${(liveIntent?.interests || []).join(', ') || 'not specified'}
+Knowledge context:
+${guidanceContext || 'No external context provided.'}
+
+Constraints:
+- Keep each field concise and demo-friendly.
+- script should be 3-5 short sentences.
+- imagePrompt and videoPrompt should be production-ready generation prompts.
+`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: interleavedModel,
+      contents: prompt,
+    });
+    const parsed = tryParseJson(response.text || '{}');
+    if (!parsed) {
+      throw new Error('Interleaved plan parse failed');
+    }
+    const title = String(parsed.title || '').trim();
+    const summary = String(parsed.summary || '').trim();
+    const script = String(parsed.script || '').trim();
+    const narration = String(parsed.narration || '').trim();
+    const caption = String(parsed.caption || '').trim();
+    const cta = String(parsed.cta || '').trim();
+    if (!title || !summary || !script || !narration || !caption || !cta) {
+      throw new Error('Interleaved plan missing required fields');
+    }
+    return {
+      title,
+      summary,
+      script,
+      narration,
+      caption,
+      cta,
+      imagePrompt: String(parsed.imagePrompt || '').trim() || `Create key visual for ${goal}`,
+      videoPrompt: String(parsed.videoPrompt || '').trim() || `Create short promo clip for ${goal}`,
+      generationPath: 'interleaved_native',
+    };
+  } catch (error: any) {
+    const fallback = await generateNarrativeFromGemini(goal, liveIntent, guidanceContext);
+    return {
+      ...fallback,
+      imagePrompt: `Create key visual for ${goal}`,
+      videoPrompt: `Create short promo clip for ${goal}`,
+      generationPath: 'fallback_orchestrated',
+      fallbackReason: String(error?.message || 'Interleaved generation failed'),
+    };
+  }
+}
+
 export async function buildStoryOutput(options: BuildStoryOptions): Promise<StoryOutput> {
-  const narrative = await generateNarrativeFromGemini(
+  const narrative = await generateInterleavedPlan(
     options.goal,
     options.liveIntent,
     options.guidanceContext,
@@ -198,6 +307,7 @@ export async function buildStoryOutput(options: BuildStoryOptions): Promise<Stor
         style: options.style,
         typographyPrompt: options.typographyPrompt,
         referenceImage: options.referenceImage,
+        imagePrompt: narrative.imagePrompt,
       });
     }
     if (!resolvedVideoUrl) {
@@ -206,6 +316,7 @@ export async function buildStoryOutput(options: BuildStoryOptions): Promise<Stor
         liveIntent: options.liveIntent,
         style: options.style,
         imageDataUrl: resolvedImageUrl,
+        videoPrompt: narrative.videoPrompt,
       });
     }
   }
@@ -223,6 +334,8 @@ export async function buildStoryOutput(options: BuildStoryOptions): Promise<Stor
         assetUrl: resolvedImageUrl,
         metadata: {
           status: resolvedImageUrl ? 'ready' : 'missing',
+          generationPath: narrative.generationPath,
+          fallbackReason: narrative.fallbackReason,
           source: resolvedImageUrl
             ? options.imageUrl
               ? 'client_generated'
@@ -237,6 +350,8 @@ export async function buildStoryOutput(options: BuildStoryOptions): Promise<Stor
         assetUrl: resolvedVideoUrl,
         metadata: {
           status: resolvedVideoUrl ? 'ready' : 'missing',
+          generationPath: narrative.generationPath,
+          fallbackReason: narrative.fallbackReason,
           source: resolvedVideoUrl
             ? options.videoUrl
               ? 'client_generated'
@@ -251,13 +366,33 @@ export async function buildStoryOutput(options: BuildStoryOptions): Promise<Stor
         metadata: {
           provider: 'browser_tts',
           status: 'ready_for_playback',
+          generationPath: narrative.generationPath,
+          fallbackReason: narrative.fallbackReason,
         },
       },
-      { type: 'narration', title: 'Voiceover', content: narrative.narration },
-      { type: 'caption', title: 'Caption', content: narrative.caption },
-      { type: 'cta', title: 'Call To Action', content: narrative.cta },
+      {
+        type: 'narration',
+        title: 'Voiceover',
+        content: narrative.narration,
+        metadata: { generationPath: narrative.generationPath, fallbackReason: narrative.fallbackReason },
+      },
+      {
+        type: 'caption',
+        title: 'Caption',
+        content: narrative.caption,
+        metadata: { generationPath: narrative.generationPath, fallbackReason: narrative.fallbackReason },
+      },
+      {
+        type: 'cta',
+        title: 'Call To Action',
+        content: narrative.cta,
+        metadata: { generationPath: narrative.generationPath, fallbackReason: narrative.fallbackReason },
+      },
     ],
-    nextAction: 'Review assets and trigger navigator execution to publish.',
+    nextAction:
+      narrative.generationPath === 'interleaved_native'
+        ? 'Interleaved package ready. Review assets and trigger navigator execution to publish.'
+        : 'Fallback package ready. Review assets and trigger navigator execution to publish.',
   };
 }
 

@@ -50,6 +50,11 @@ Optional safety guardrail:
   - `LIVE_AGENT_PROVIDER=gemini_live|adk_compatible|genai_fallback`
   - `GEMINI_LIVE_MODEL` (default: `gemini-live-2.5-flash-preview`)
   The backend attempts a live connection when available and gracefully falls back.
+- Storyteller interleaved-first mode:
+  - `INTERLEAVED_MODEL` (default: `gemini-2.5-flash`)
+  - Backend attempts one structured interleaved plan first, then generates image/video
+    prompts from that plan. Blocks include metadata (`generationPath`, `fallbackReason`)
+    so demo judges can see native-path vs fallback-path behavior clearly.
 - `POST /api/story/generate-stream` returns NDJSON interleaved story blocks
   (`status`, `block`, `final`) for fluid mixed-media storytelling UX.
 - `POST /api/story/generate` requires a ready live intent and returns a full

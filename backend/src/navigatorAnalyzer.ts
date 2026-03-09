@@ -6,17 +6,29 @@ type AnalyzeNavigatorOptions = {
   goal: string;
   screenshotBase64?: string;
   screenRecordingBase64?: string;
+  storyContext?: {
+    summary?: string;
+    script?: string;
+    caption?: string;
+    cta?: string;
+    imageAssetUrl?: string;
+    videoAssetUrl?: string;
+  };
 };
 
 type SelectorHints = {
   titleInput?: string;
   descriptionInput?: string;
+  captionInput?: string;
+  fileInput?: string;
   submitButton?: string;
 };
 
 const FALLBACK_SELECTORS: SelectorHints = {
   titleInput: '#title',
   descriptionInput: '#description',
+  captionInput: '#caption',
+  fileInput: 'input[type="file"]',
   submitButton: 'button[type="submit"]',
 };
 
@@ -32,7 +44,12 @@ function summarizeError(error: unknown): string {
 
 function buildPlanFromSelectors(
   selectors: SelectorHints,
-  titleValue: string,
+  values: {
+    titleValue: string;
+    descriptionValue?: string;
+    captionValue?: string;
+    imageAssetUrl?: string;
+  },
   notes: string,
   confidence: number,
 ): NavigatorPlan {
@@ -46,7 +63,7 @@ function buildPlanFromSelectors(
     actionPlan.push({
       action: 'type',
       target: selectors.titleInput,
-      value: titleValue,
+      value: values.titleValue,
       confidence: clamp(confidence - 0.01),
       reason: 'Set title',
     });
@@ -58,6 +75,61 @@ function buildPlanFromSelectors(
       selectorHint: selectors.descriptionInput,
       confidence: clamp(confidence - 0.03),
     });
+    if (values.descriptionValue) {
+      actionPlan.push({
+        action: 'click',
+        target: selectors.descriptionInput,
+        confidence: clamp(confidence - 0.03),
+        reason: 'Focus description field',
+      });
+      actionPlan.push({
+        action: 'type',
+        target: selectors.descriptionInput,
+        value: values.descriptionValue,
+        confidence: clamp(confidence - 0.04),
+        reason: 'Fill description/story context',
+      });
+    }
+  }
+
+  if (selectors.captionInput) {
+    detectedElements.push({
+      name: 'Caption input',
+      selectorHint: selectors.captionInput,
+      confidence: clamp(confidence - 0.03),
+    });
+    if (values.captionValue) {
+      actionPlan.push({
+        action: 'click',
+        target: selectors.captionInput,
+        confidence: clamp(confidence - 0.03),
+        reason: 'Focus caption field',
+      });
+      actionPlan.push({
+        action: 'type',
+        target: selectors.captionInput,
+        value: values.captionValue,
+        confidence: clamp(confidence - 0.04),
+        reason: 'Set caption',
+      });
+    }
+  }
+
+  if (selectors.fileInput) {
+    detectedElements.push({
+      name: 'File upload input',
+      selectorHint: selectors.fileInput,
+      confidence: clamp(confidence - 0.04),
+    });
+    if (values.imageAssetUrl) {
+      actionPlan.push({
+        action: 'upload_file',
+        target: selectors.fileInput,
+        value: values.imageAssetUrl,
+        confidence: clamp(confidence - 0.05),
+        reason: 'Upload generated campaign image asset',
+      });
+    }
   }
 
   if (selectors.submitButton) {
@@ -253,9 +325,23 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
         'button',
         'input[type="submit"]',
       ];
+      const captionCandidates = [
+        '#caption',
+        'textarea[name="caption"]',
+        'textarea[id*="caption"]',
+        'textarea[placeholder*="caption" i]',
+      ];
+      const fileCandidates = [
+        'input[type="file"]',
+        'input[name*="image" i]',
+        'input[id*="image" i]',
+        'input[name*="upload" i]',
+      ];
 
       let titleInput: string | null = null;
       let descriptionInput: string | null = null;
+      let captionInput: string | null = null;
+      let fileInput: string | null = null;
       let submitButton: string | null = null;
 
       for (const selector of titleCandidates) {
@@ -291,7 +377,29 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
         }
       }
 
-      return { titleInput, descriptionInput, submitButton };
+      for (const selector of captionCandidates) {
+        try {
+          if (document.querySelector(selector)) {
+            captionInput = selector;
+            break;
+          }
+        } catch {
+          // Ignore invalid selectors in browser context.
+        }
+      }
+
+      for (const selector of fileCandidates) {
+        try {
+          if (document.querySelector(selector)) {
+            fileInput = selector;
+            break;
+          }
+        } catch {
+          // Ignore invalid selectors in browser context.
+        }
+      }
+
+      return { titleInput, descriptionInput, captionInput, fileInput, submitButton };
     });
 
     if (!selectors.titleInput && !selectors.submitButton) {
@@ -301,6 +409,8 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
     return {
       titleInput: selectors.titleInput || undefined,
       descriptionInput: selectors.descriptionInput || undefined,
+      captionInput: selectors.captionInput || undefined,
+      fileInput: selectors.fileInput || undefined,
       submitButton: selectors.submitButton || undefined,
     };
   } finally {
@@ -309,7 +419,14 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
 }
 
 export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): Promise<NavigatorPlan> {
-  const titleValue = `Story for "${options.goal}"`;
+  const titleValue = options.storyTitle || `Story for "${options.goal}"`;
+  const descriptionValue =
+    options.storyContext?.script ||
+    options.storyContext?.summary ||
+    `Campaign description for ${options.goal}`;
+  const captionValue = [options.storyContext?.caption, options.storyContext?.cta]
+    .filter(Boolean)
+    .join('\n');
   const maybeTargetUrl = options.targetUrl?.trim();
 
   const recordingPlan = await analyzeFromScreenRecordingWithGemini(options);
@@ -331,7 +448,12 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
   if (!maybeTargetUrl) {
     return buildPlanFromSelectors(
       FALLBACK_SELECTORS,
-      options.storyTitle || titleValue,
+      {
+        titleValue,
+        descriptionValue,
+        captionValue,
+        imageAssetUrl: options.storyContext?.imageAssetUrl,
+      },
       'No target URL provided. Using fallback deterministic selector plan.',
       0.89,
     );
@@ -342,7 +464,12 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
     if (!detected) {
       return buildPlanFromSelectors(
         FALLBACK_SELECTORS,
-        options.storyTitle || titleValue,
+        {
+          titleValue,
+          descriptionValue,
+          captionValue,
+          imageAssetUrl: options.storyContext?.imageAssetUrl,
+        },
         `Target URL analyzed (${maybeTargetUrl}), but required elements were not detected. Using fallback plan.`,
         0.72,
       );
@@ -350,14 +477,24 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
 
     return buildPlanFromSelectors(
       detected,
-      options.storyTitle || titleValue,
+      {
+        titleValue,
+        descriptionValue,
+        captionValue,
+        imageAssetUrl: options.storyContext?.imageAssetUrl,
+      },
       `Selector plan generated from live page analysis: ${maybeTargetUrl}`,
       0.93,
     );
   } catch (error: any) {
     return buildPlanFromSelectors(
       FALLBACK_SELECTORS,
-      options.storyTitle || titleValue,
+      {
+        titleValue,
+        descriptionValue,
+        captionValue,
+        imageAssetUrl: options.storyContext?.imageAssetUrl,
+      },
       `Live page analysis failed (${summarizeError(error)}). Using fallback plan.`,
       0.7,
     );
