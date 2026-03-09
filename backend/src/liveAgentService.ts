@@ -73,6 +73,7 @@ function extractObjective(message: string, fallbackGoal: string): string {
 }
 
 function nextFollowUp(intent: LiveIntent): string {
+  if (!intent.objective) return 'What is the main objective of this campaign?';
   if (!intent.audience) return 'Who is the primary audience for this campaign?';
   if (!intent.tone) return 'What tone should I use (playful, cinematic, professional, etc.)?';
   if (!intent.platform) return 'Which platform should we optimize for (instagram, youtube, tiktok, linkedin, web)?';
@@ -95,6 +96,33 @@ async function processLiveMessageInternal(params: {
   const message = params.message.trim();
   const previous = params.previousIntent;
   const lower = message.toLowerCase();
+  const interruptionRequested =
+    lower === 'stop' ||
+    lower === 'cancel' ||
+    lower.includes('stop for now') ||
+    lower.includes('pause intake');
+
+  if (interruptionRequested) {
+    const previousIntent: LiveIntent = previous || {
+      intent: 'create_story',
+      objective: '',
+      audience: '',
+      tone: '',
+      platform: '',
+      readyForStoryGeneration: false,
+      handoffTo: 'none',
+      missingFields: ['objective', 'audience', 'tone', 'platform'],
+      confidence: 0.5,
+    };
+    return {
+      liveIntent: {
+        ...previousIntent,
+        readyForStoryGeneration: false,
+        handoffTo: 'none',
+      },
+      reply: 'Understood. I paused intake. Send your next message when you want to continue.',
+    };
+  }
 
   const ai = await getAI();
   if (ai) {

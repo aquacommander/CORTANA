@@ -49,10 +49,14 @@ export const apiClient = {
       method: 'POST',
     }),
 
-  sendLiveMessage: (payload: { sessionId: string; message: string }) =>
+  sendLiveMessage: (
+    payload: { sessionId: string; message: string },
+    options?: { signal?: AbortSignal },
+  ) =>
     request<{ liveIntent: LiveIntent; reply: string }>('/live/message', {
       method: 'POST',
       body: JSON.stringify(payload),
+      signal: options?.signal,
     }),
 
   generateStory: (payload: {
