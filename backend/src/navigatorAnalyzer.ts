@@ -18,6 +18,16 @@ const FALLBACK_SELECTORS: SelectorHints = {
   submitButton: 'button[type="submit"]',
 };
 
+function summarizeError(error: unknown): string {
+  const raw = String((error as any)?.message || error || 'unknown error');
+  const noAnsi = raw.replace(/\u001b\[[0-9;]*m/g, '');
+  const firstLine = noAnsi.split('\n')[0]?.trim() || 'unknown error';
+  if (firstLine.toLowerCase().includes('executable doesn')) {
+    return 'Playwright browser executable is missing. Run `npx playwright install chromium`.';
+  }
+  return firstLine;
+}
+
 function buildPlanFromSelectors(
   selectors: SelectorHints,
   titleValue: string,
@@ -49,46 +59,66 @@ async function detectSelectorsFromPage(targetUrl: string): Promise<SelectorHints
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
     const selectors = await page.evaluate(() => {
-      const firstMatchingSelector = (candidates: string[]): string | null => {
-        for (const selector of candidates) {
-          try {
-            if (document.querySelector(selector)) return selector;
-          } catch {
-            // Ignore invalid selectors for native querySelector.
-          }
-        }
-        return null;
-      };
-
-      const titleInput = firstMatchingSelector([
+      const titleCandidates = [
         '#title',
         'input[name="title"]',
         'input[id*="title"]',
         'input[placeholder*="title" i]',
         'input[type="text"]',
         'textarea[name="title"]',
-      ]);
-
-      const descriptionInput = firstMatchingSelector([
+      ];
+      const descriptionCandidates = [
         '#description',
         'textarea[name="description"]',
         'textarea[id*="description"]',
         'textarea[placeholder*="description" i]',
         'textarea',
-      ]);
-
-      const submitButton = firstMatchingSelector([
+      ];
+      const submitCandidates = [
         'button[type="submit"]',
         'button[id*="publish" i]',
         'button',
         'input[type="submit"]',
-      ]);
+      ];
 
-      return {
-        titleInput,
-        descriptionInput,
-        submitButton,
-      };
+      let titleInput: string | null = null;
+      let descriptionInput: string | null = null;
+      let submitButton: string | null = null;
+
+      for (const selector of titleCandidates) {
+        try {
+          if (document.querySelector(selector)) {
+            titleInput = selector;
+            break;
+          }
+        } catch {
+          // Ignore invalid selectors in browser context.
+        }
+      }
+
+      for (const selector of descriptionCandidates) {
+        try {
+          if (document.querySelector(selector)) {
+            descriptionInput = selector;
+            break;
+          }
+        } catch {
+          // Ignore invalid selectors in browser context.
+        }
+      }
+
+      for (const selector of submitCandidates) {
+        try {
+          if (document.querySelector(selector)) {
+            submitButton = selector;
+            break;
+          }
+        } catch {
+          // Ignore invalid selectors in browser context.
+        }
+      }
+
+      return { titleInput, descriptionInput, submitButton };
     });
 
     if (!selectors.titleInput || !selectors.submitButton) {
@@ -139,7 +169,7 @@ export async function analyzeNavigatorTarget(options: AnalyzeNavigatorOptions): 
     return buildPlanFromSelectors(
       FALLBACK_SELECTORS,
       options.storyTitle || titleValue,
-      `Live page analysis failed (${error?.message || 'unknown error'}). Using fallback plan.`,
+      `Live page analysis failed (${summarizeError(error)}). Using fallback plan.`,
       0.7,
     );
   }
