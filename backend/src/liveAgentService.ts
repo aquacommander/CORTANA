@@ -21,7 +21,10 @@ function normalizeTone(value: string): string {
 
 function extractObjective(message: string, fallbackGoal: string): string {
   const trimmed = message.trim();
-  if (trimmed.length > 5) return trimmed;
+  const lower = trimmed.toLowerCase();
+  const looksLikeCommand =
+    lower.includes('generate') || lower.includes('go ahead') || lower.includes('continue');
+  if (trimmed.length > 5 && !looksLikeCommand) return trimmed;
   return fallbackGoal;
 }
 
@@ -50,7 +53,10 @@ export function processLiveMessage(params: {
 
   const hasExplicitGenerateRequest =
     lower.includes('generate') || lower.includes('go ahead') || lower.includes('continue');
-  const readyForStoryGeneration = Boolean(objective && audience && tone && platform) && (hasExplicitGenerateRequest || !previous);
+  const hasAllRequiredFields = Boolean(objective && audience && tone && platform);
+  const readyForStoryGeneration =
+    Boolean(previous?.readyForStoryGeneration) ||
+    (hasAllRequiredFields && (hasExplicitGenerateRequest || !previous));
 
   const liveIntent: LiveIntent = {
     intent: intentValue,
