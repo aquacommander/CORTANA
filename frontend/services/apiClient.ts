@@ -70,7 +70,13 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
 
-  regenerateStoryBlock: (payload: { sessionId: string; blockType: 'text' | 'narration' | 'caption' | 'cta'; title?: string }) =>
+  regenerateStoryBlock: (payload: {
+    sessionId: string;
+    blockType: 'text' | 'narration' | 'caption' | 'cta';
+    title?: string;
+    blockIndex?: number;
+    currentContent?: string;
+  }) =>
     request<{ storyOutput: StoryOutput }>('/story/regenerate-block', {
       method: 'POST',
       body: JSON.stringify(payload),

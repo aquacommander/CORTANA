@@ -30,6 +30,8 @@ export const regenerateStoryBlockSchema = z.object({
   sessionId: requiredString('sessionId', 120),
   blockType: z.enum(['text', 'narration', 'caption', 'cta']),
   title: z.string().trim().max(120, 'title is too long').optional(),
+  blockIndex: z.number().int().min(0).max(200).optional(),
+  currentContent: z.string().trim().max(12000, 'currentContent is too long').optional(),
 });
 
 export const navigatorAnalyzeSchema = z.object({

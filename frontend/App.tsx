@@ -513,15 +513,26 @@ const App: React.FC = () => {
     recognition.start();
   };
 
-  const handleRegenerateStoryBlock = async (blockType: 'text' | 'narration' | 'caption' | 'cta') => {
+  const handleRegenerateStoryBlock = async (
+    blockType: 'text' | 'narration' | 'caption' | 'cta',
+    blockIndex: number,
+    title?: string,
+    currentContent?: string,
+  ) => {
     const id = (loadedSession?.sessionId || sessionId || sessionLookupId).trim();
     if (!id) return;
     setIsRegeneratingBlock(true);
     try {
-      await apiClient.regenerateStoryBlock({ sessionId: id, blockType });
+      await apiClient.regenerateStoryBlock({
+        sessionId: id,
+        blockType,
+        blockIndex,
+        title,
+        currentContent,
+      });
       const session = await refreshLoadedSession(id);
       setSessionLookupId(session.sessionId);
-      setStatusMessage(`Regenerated ${blockType} block.`);
+      setStatusMessage(`Regenerated ${title || blockType} block.`);
     } catch (error: any) {
       setStatusMessage(error.message || `Unable to regenerate ${blockType} block`);
     } finally {
@@ -961,7 +972,14 @@ const App: React.FC = () => {
                       {(block.type === 'text' || block.type === 'narration' || block.type === 'caption' || block.type === 'cta') && (
                         <button
                           type="button"
-                          onClick={() => handleRegenerateStoryBlock(block.type as 'text' | 'narration' | 'caption' | 'cta')}
+                          onClick={() =>
+                            handleRegenerateStoryBlock(
+                              block.type as 'text' | 'narration' | 'caption' | 'cta',
+                              idx,
+                              block.title,
+                              block.content,
+                            )
+                          }
                           disabled={isRegeneratingBlock}
                           className="mt-2 px-2 py-1 rounded border border-stone-300 dark:border-zinc-700 text-[10px] font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
                         >
