@@ -13,6 +13,7 @@ export const createSessionSchema = z.object({
 export const liveMessageSchema = z.object({
   sessionId: requiredString('sessionId', 120),
   message: requiredString('message', 5000),
+  screenshotBase64: z.string().trim().max(20000000, 'screenshotBase64 is too long').optional(),
 });
 
 export const generateStorySchema = z.object({

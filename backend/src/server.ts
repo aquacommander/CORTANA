@@ -9,6 +9,7 @@ import {
 } from '../../frontend/shared/contracts.ts';
 import { analyzeNavigatorTarget } from './navigatorAnalyzer.ts';
 import { executeNavigatorPlan } from './navigatorExecutor.ts';
+import { getKnowledgeContext } from './knowledgeService.ts';
 import { processLiveMessage } from './liveAgentService.ts';
 import { SessionStore } from './sessionStore.ts';
 import { buildStoryOutput, regenerateStoryBlock } from './storytellerService.ts';
@@ -100,12 +101,15 @@ async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function processAndPersistLiveMessage(sessionId: string, message: string) {
+async function processAndPersistLiveMessage(sessionId: string, message: string, screenshotBase64?: string) {
   const session = getSessionOrThrow(sessionId);
+  const knowledgeContext = await getKnowledgeContext(`${session.goal}\n${message}`);
   const { liveIntent, reply } = await processLiveMessage({
     message,
     goal: session.goal,
     previousIntent: session.liveIntent,
+    knowledgeContext,
+    screenshotBase64,
   });
 
   session.liveIntent = liveIntent;
@@ -192,8 +196,8 @@ app.post('/api/live/message', async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
-    const { sessionId, message } = parsed.data;
-    const { liveIntent, reply } = await processAndPersistLiveMessage(sessionId, message);
+    const { sessionId, message, screenshotBase64 } = parsed.data;
+    const { liveIntent, reply } = await processAndPersistLiveMessage(sessionId, message, screenshotBase64);
 
     return res.json({
       liveIntent,
@@ -210,8 +214,8 @@ app.post('/api/live/message-stream', async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
     }
-    const { sessionId, message } = parsed.data;
-    const { liveIntent, reply } = await processAndPersistLiveMessage(sessionId, message);
+    const { sessionId, message, screenshotBase64 } = parsed.data;
+    const { liveIntent, reply } = await processAndPersistLiveMessage(sessionId, message, screenshotBase64);
 
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -259,6 +263,9 @@ app.post('/api/story/generate', async (req, res) => {
       sessionId: randomUUID(),
       goal: text?.trim() || session.goal,
       liveIntent: session.liveIntent,
+      guidanceContext: await getKnowledgeContext(
+        `${text?.trim() || session.goal}\n${session.conversationSummary}\n${JSON.stringify(session.liveIntent || {})}`,
+      ),
       style,
       typographyPrompt,
       referenceImage,
@@ -276,6 +283,66 @@ app.post('/api/story/generate', async (req, res) => {
     return res.json({ storyOutput });
   } catch (error: any) {
     return res.status(400).json({ error: error.message || 'Unable to generate story' });
+  }
+});
+
+app.post('/api/story/generate-stream', async (req, res) => {
+  try {
+    const parsed = generateStorySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
+    }
+    const {
+      sessionId,
+      text,
+      style,
+      typographyPrompt,
+      referenceImage,
+      imageUrl,
+      videoUrl,
+      generateAssets,
+    } = parsed.data;
+    const session = getSessionOrThrow(sessionId);
+    ensureStage(session, 'STORY_GENERATION');
+    if (!session.liveIntent?.readyForStoryGeneration) {
+      return res.status(400).json({
+        error: 'Live intent is incomplete. Continue intake conversation before story generation.',
+      });
+    }
+
+    const storyOutput = await buildStoryOutput({
+      sessionId: randomUUID(),
+      goal: text?.trim() || session.goal,
+      liveIntent: session.liveIntent,
+      guidanceContext: await getKnowledgeContext(
+        `${text?.trim() || session.goal}\n${session.conversationSummary}\n${JSON.stringify(session.liveIntent || {})}`,
+      ),
+      style,
+      typographyPrompt,
+      referenceImage,
+      imageUrl,
+      videoUrl,
+      generateAssets: generateAssets ?? false,
+    });
+
+    session.storyOutput = storyOutput;
+    appendLog(session, 'Story output generated');
+    moveStage(session, 'STORY_REVIEW');
+    appendLog(session, 'Stage advanced to STORY_REVIEW');
+    await store.set(session);
+
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.write(`${JSON.stringify({ type: 'status', message: 'Story generation started' })}\n`);
+    for (const block of storyOutput.blocks) {
+      res.write(`${JSON.stringify({ type: 'block', block })}\n`);
+      await sleep(40);
+    }
+    res.write(`${JSON.stringify({ type: 'final', storyOutput })}\n`);
+    return res.end();
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Unable to stream story generation' });
   }
 });
 
@@ -355,6 +422,7 @@ app.post('/api/navigator/analyze', async (req, res) => {
       targetUrl,
       storyTitle: session.storyOutput?.title || `Story for "${session.goal}"`,
       goal: session.goal,
+      screenshotBase64,
     });
 
     session.navigatorPlan = navigatorPlan;

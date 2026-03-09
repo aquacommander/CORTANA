@@ -9,7 +9,7 @@ export type WorkflowStage =
   | 'COMPLETION';
 
 export interface StoryBlock {
-  type: 'text' | 'image' | 'video' | 'narration' | 'caption' | 'cta';
+  type: 'text' | 'image' | 'video' | 'audio' | 'narration' | 'caption' | 'cta';
   title: string;
   content?: string;
   assetUrl?: string;
@@ -29,6 +29,9 @@ export interface LiveIntent {
   audience: string;
   tone: string;
   platform: string;
+  needs?: string[];
+  interests?: string[];
+  unresolvedQuestions?: string[];
   readyForStoryGeneration: boolean;
   handoffTo: 'storyteller' | 'navigator' | 'none';
   missingFields?: Array<'objective' | 'audience' | 'tone' | 'platform'>;

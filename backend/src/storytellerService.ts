@@ -4,6 +4,7 @@ type BuildStoryOptions = {
   sessionId: string;
   goal: string;
   liveIntent?: LiveIntent;
+  guidanceContext?: string;
   style?: string;
   typographyPrompt?: string;
   referenceImage?: string;
@@ -117,7 +118,7 @@ Style: ${options.style || 'high quality campaign style'}`,
   }
 }
 
-async function generateNarrativeFromGemini(goal: string, liveIntent?: LiveIntent) {
+async function generateNarrativeFromGemini(goal: string, liveIntent?: LiveIntent, guidanceContext?: string) {
   const ai = await getAI();
   if (!ai) {
     return {
@@ -140,6 +141,10 @@ Audience: ${liveIntent?.audience || 'general audience'}
 Tone: ${liveIntent?.tone || 'cinematic'}
 Platform: ${liveIntent?.platform || 'web'}
 Objective: ${liveIntent?.objective || goal}
+Needs: ${(liveIntent?.needs || []).join(', ') || 'not specified'}
+Interests: ${(liveIntent?.interests || []).join(', ') || 'not specified'}
+Knowledge context:
+${guidanceContext || 'No external context provided.'}
 
 Constraints:
 - Keep each field concise and demo-friendly.
@@ -177,7 +182,11 @@ Output only valid JSON.
 }
 
 export async function buildStoryOutput(options: BuildStoryOptions): Promise<StoryOutput> {
-  const narrative = await generateNarrativeFromGemini(options.goal, options.liveIntent);
+  const narrative = await generateNarrativeFromGemini(
+    options.goal,
+    options.liveIntent,
+    options.guidanceContext,
+  );
   let resolvedImageUrl = options.imageUrl;
   let resolvedVideoUrl = options.videoUrl;
 
@@ -233,6 +242,15 @@ export async function buildStoryOutput(options: BuildStoryOptions): Promise<Stor
               ? 'client_generated'
               : 'backend_generated'
             : 'pending_generation',
+        },
+      },
+      {
+        type: 'audio',
+        title: 'Narration Audio',
+        content: narrative.narration,
+        metadata: {
+          provider: 'browser_tts',
+          status: 'ready_for_playback',
         },
       },
       { type: 'narration', title: 'Voiceover', content: narrative.narration },

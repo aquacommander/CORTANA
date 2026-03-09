@@ -503,7 +503,11 @@ const App: React.FC = () => {
       if (useStreamingReplies) {
         let aggregateReply = '';
         response = await apiClient.sendLiveMessageStream(
-          { sessionId: activeSessionId, message },
+          {
+            sessionId: activeSessionId,
+            message,
+            screenshotBase64: referenceImage ? referenceImage.split(',')[1] || undefined : undefined,
+          },
           {
             signal: controller.signal,
             onDelta: (chunk) => {
@@ -517,6 +521,7 @@ const App: React.FC = () => {
           {
             sessionId: activeSessionId,
             message,
+            screenshotBase64: referenceImage ? referenceImage.split(',')[1] || undefined : undefined,
           },
           {
             signal: controller.signal,
@@ -636,6 +641,19 @@ const App: React.FC = () => {
     }
   };
 
+  const playNarrationAudio = (text?: string) => {
+    if (!text || !('speechSynthesis' in window)) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // ignore speech synthesis errors
+    }
+  };
+
   const handleRegenerateStoryBlock = async (
     blockType: 'text' | 'narration' | 'caption' | 'cta',
     blockIndex: number,
@@ -692,7 +710,11 @@ const App: React.FC = () => {
         setSessionId(session.sessionId);
       }
       if (activeSessionId) {
-        const intakeResponse = await apiClient.sendLiveMessage({ sessionId: activeSessionId, message: inputText });
+        const intakeResponse = await apiClient.sendLiveMessage({
+          sessionId: activeSessionId,
+          message: inputText,
+          screenshotBase64: referenceImage ? referenceImage.split(',')[1] || undefined : undefined,
+        });
         setIntakeTranscript((prev) => [
           ...prev,
           { role: 'user', content: inputText },
@@ -717,13 +739,16 @@ const App: React.FC = () => {
 
       if (activeSessionId) {
         try {
-          await apiClient.generateStory({
+          await apiClient.generateStoryStream({
             sessionId: activeSessionId,
             text: inputText,
             style: styleToUse,
             typographyPrompt: typographyPrompt,
             referenceImage: referenceImage || undefined,
             generateAssets: true,
+          }, {
+            onStatus: (message) => setStatusMessage(message),
+            onBlock: (block) => setStatusMessage(`Generated ${block.type}: ${block.title}`),
           });
           const refreshed = await refreshLoadedSession(activeSessionId);
           resolvedImageUrl = getStoryAssetUrl(refreshed, 'image');
@@ -1014,6 +1039,16 @@ const App: React.FC = () => {
                     Live intent confidence: {Math.round((loadedSession.liveIntent.confidence || 0) * 100)}%
                   </p>
                 )}
+                {loadedSession?.liveIntent?.needs && loadedSession.liveIntent.needs.length > 0 && (
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">
+                    Needs: {loadedSession.liveIntent.needs.join(', ')}
+                  </p>
+                )}
+                {loadedSession?.liveIntent?.interests && loadedSession.liveIntent.interests.length > 0 && (
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">
+                    Interests: {loadedSession.liveIntent.interests.join(', ')}
+                  </p>
+                )}
               </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1132,6 +1167,15 @@ const App: React.FC = () => {
                         <a className="text-xs underline text-stone-600 dark:text-zinc-300 mt-1 inline-block" href={block.assetUrl} target="_blank" rel="noreferrer">
                           Open asset
                         </a>
+                      )}
+                      {block.type === 'audio' && block.content && (
+                        <button
+                          type="button"
+                          onClick={() => playNarrationAudio(block.content)}
+                          className="mt-2 px-2 py-1 rounded border border-stone-300 dark:border-zinc-700 text-[10px] font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800"
+                        >
+                          Play narration
+                        </button>
                       )}
                       {(block.type === 'text' || block.type === 'narration' || block.type === 'caption' || block.type === 'cta') && (
                         <button

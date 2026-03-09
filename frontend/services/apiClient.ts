@@ -50,7 +50,7 @@ export const apiClient = {
     }),
 
   sendLiveMessage: (
-    payload: { sessionId: string; message: string },
+    payload: { sessionId: string; message: string; screenshotBase64?: string },
     options?: { signal?: AbortSignal },
   ) =>
     request<{ liveIntent: LiveIntent; reply: string }>('/live/message', {
@@ -60,7 +60,7 @@ export const apiClient = {
     }),
 
   sendLiveMessageStream: async (
-    payload: { sessionId: string; message: string },
+    payload: { sessionId: string; message: string; screenshotBase64?: string },
     handlers: {
       onDelta: (chunk: string) => void;
       signal?: AbortSignal;
@@ -132,6 +132,72 @@ export const apiClient = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  generateStoryStream: async (
+    payload: {
+      sessionId: string;
+      text?: string;
+      style?: string;
+      typographyPrompt?: string;
+      referenceImage?: string;
+      imageUrl?: string;
+      videoUrl?: string;
+      generateAssets?: boolean;
+    },
+    handlers: {
+      onStatus?: (message: string) => void;
+      onBlock?: (block: StoryOutput['blocks'][number]) => void;
+      signal?: AbortSignal;
+    },
+  ): Promise<{ storyOutput: StoryOutput }> => {
+    const response = await fetch(`${API_BASE}/story/generate-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: handlers.signal,
+    });
+    if (!response.ok || !response.body) {
+      let details = '';
+      try {
+        details = await response.text();
+      } catch {
+        details = response.statusText;
+      }
+      throw new Error(`API ${response.status}: ${details || 'Request failed'}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalPayload: { storyOutput: StoryOutput } | null = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        let parsed: any;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (parsed.type === 'status' && typeof parsed.message === 'string') {
+          handlers.onStatus?.(parsed.message);
+        } else if (parsed.type === 'block' && parsed.block) {
+          handlers.onBlock?.(parsed.block);
+        } else if (parsed.type === 'final' && parsed.storyOutput) {
+          finalPayload = { storyOutput: parsed.storyOutput as StoryOutput };
+        }
+      }
+    }
+    if (!finalPayload) {
+      throw new Error('Stream ended without final story output');
+    }
+    return finalPayload;
+  },
 
   regenerateStoryBlock: (payload: {
     sessionId: string;
