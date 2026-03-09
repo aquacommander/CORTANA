@@ -8,6 +8,7 @@ type LiveAgentResult = {
 const AUDIENCE_HINTS = ['kids', 'developers', 'marketers', 'students', 'founders', 'creators'];
 const TONE_HINTS = ['playful', 'cinematic', 'professional', 'friendly', 'bold', 'inspirational', 'fun'];
 const PLATFORM_HINTS = ['instagram', 'youtube', 'tiktok', 'linkedin', 'x', 'web'];
+const INTEREST_HINTS = ['sports', 'fitness', 'education', 'gaming', 'fashion', 'travel', 'food', 'finance', 'music', 'tech'];
 
 function extractHint(message: string, hints: string[]): string | undefined {
   const lower = message.toLowerCase();
@@ -70,6 +71,26 @@ function extractObjective(message: string, fallbackGoal: string): string {
   const trimmed = message.trim();
   if (trimmed.length > 5) return trimmed;
   return fallbackGoal;
+}
+
+function extractInterestsFromMessage(message: string): string[] {
+  const lower = message.toLowerCase();
+  return INTEREST_HINTS.filter((hint) => lower.includes(hint));
+}
+
+function buildHeuristicAnswerPrefix(message: string, knowledgeContext?: string): string {
+  const lower = message.toLowerCase();
+  if (lower.includes('sport')) {
+    return 'Great direction. A sports campaign usually performs best with energetic language, clear audience targeting, and platform-specific CTA.';
+  }
+  if (message.includes('?')) {
+    const contextLine = (knowledgeContext || '').split('\n').find((line) => line.trim().startsWith('- '));
+    if (contextLine) {
+      return `Good question. Based on current guidance, ${contextLine.replace(/^-+\s*/, '').trim()}`;
+    }
+    return 'Good question. I can help with that and tailor the campaign approach to your objective.';
+  }
+  return 'Thanks, I understand your message.';
 }
 
 function nextFollowUp(intent: LiveIntent): string {
@@ -140,6 +161,11 @@ intent, objective, audience, tone, platform, needs, interests, unresolvedQuestio
 Allowed intent values: create_story, publish_story
 If a field is unknown, return empty string.
 needs/interests/unresolvedQuestions should be arrays of short strings.
+assistantResponse rules:
+- Always answer or acknowledge the user's actual message meaning first.
+- If user asked a question, answer that question directly in 1-3 sentences.
+- If story generation fields are still missing, end with only ONE best follow-up question.
+- Do not ignore user topic keywords (e.g., sports, education, gaming, etc.).
 
 Goal: ${params.goal}
 Previous state: ${JSON.stringify(previous || {})}
@@ -177,7 +203,7 @@ ${params.knowledgeContext || 'No external context provided.'}
           : previous?.needs || [];
         const interests = Array.isArray(parsed.interests)
           ? parsed.interests.map((item: unknown) => String(item).trim()).filter(Boolean)
-          : previous?.interests || [];
+          : [...(previous?.interests || []), ...extractInterestsFromMessage(message)];
         const unresolvedQuestions = Array.isArray(parsed.unresolvedQuestions)
           ? parsed.unresolvedQuestions.map((item: unknown) => String(item).trim()).filter(Boolean)
           : previous?.unresolvedQuestions || [];
@@ -207,12 +233,13 @@ ${params.knowledgeContext || 'No external context provided.'}
               : 0.65,
         };
 
+        const assistantResponse = String(parsed.assistantResponse || '').trim();
         return {
           liveIntent,
           reply: readyForStoryGeneration
-            ? String(parsed.assistantResponse || '').trim() ||
+            ? assistantResponse ||
               `Perfect - I captured your intent for ${platform}. I can hand off to Storyteller now.`
-            : `${String(parsed.assistantResponse || '').trim() || 'Thanks for sharing.'} ${nextFollowUp(liveIntent)}`,
+            : assistantResponse || nextFollowUp(liveIntent),
         };
       }
     } catch {
@@ -231,6 +258,7 @@ ${params.knowledgeContext || 'No external context provided.'}
   const objective = extractLabeledValue(message, 'objective') || previous?.objective || extractObjective(message, params.goal);
   const extractedNeed = extractLabeledValue(message, 'need');
   const extractedInterest = extractLabeledValue(message, 'interest');
+  const inferredInterests = extractInterestsFromMessage(message);
   const intentValue =
     lower.includes('publish') || lower.includes('post') ? 'publish_story' : previous?.intent || 'create_story';
 
@@ -244,7 +272,9 @@ ${params.knowledgeContext || 'No external context provided.'}
     tone: tone || '',
     platform: platform || '',
     needs: extractedNeed ? [extractedNeed] : previous?.needs || [],
-    interests: extractedInterest ? [extractedInterest] : previous?.interests || [],
+    interests: extractedInterest
+      ? [extractedInterest]
+      : [...new Set([...(previous?.interests || []), ...inferredInterests])],
     unresolvedQuestions: message.includes('?')
       ? [message]
       : previous?.unresolvedQuestions || [],
@@ -254,9 +284,10 @@ ${params.knowledgeContext || 'No external context provided.'}
     confidence: readyForStoryGeneration ? 0.8 : 0.6,
   };
 
+  const answerPrefix = buildHeuristicAnswerPrefix(message, params.knowledgeContext);
   const reply = readyForStoryGeneration
-    ? `Perfect - I captured your intent for ${platform}. I can hand off to Storyteller now.`
-    : nextFollowUp(liveIntent);
+    ? `${answerPrefix} Perfect - I captured your intent for ${platform}. I can hand off to Storyteller now.`
+    : `${answerPrefix} ${nextFollowUp(liveIntent)}`;
 
   return { liveIntent, reply };
 }
