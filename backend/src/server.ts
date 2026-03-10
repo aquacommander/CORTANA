@@ -570,8 +570,22 @@ async function startServer() {
   });
 
   httpServer.listen(PORT, () => {
+    const liveMode = (process.env.LIVE_AGENT_PROVIDER || '').trim() || 'gemini_live';
+    const liveModel = (process.env.GEMINI_LIVE_MODEL || '').trim() || 'gemini-live-2.5-flash-preview';
+    const vertexProject = (process.env.GOOGLE_CLOUD_PROJECT || '').trim() || undefined;
+    const vertexLocation = (process.env.GOOGLE_CLOUD_LOCATION || '').trim() || undefined;
+    console.log(
+      `[${new Date().toISOString()}] [INFO] server.started ${JSON.stringify({
+        port: PORT,
+        wsPath: '/api/live/ws',
+        liveMode,
+        liveModel,
+        vertexProject,
+        vertexLocation,
+      })}`,
+    );
     console.log(`Backend server listening on http://localhost:${PORT}`);
-    console.log(`Live websocket endpoint: ws://localhost:${PORT}/api/live/ws`);
+    console.log(`Live websocket endpoint: ws://localhost:${PORT}/api/live/ws (and /ws)`);
     console.log(`Loaded sessions: ${store.size}`);
   });
 }
