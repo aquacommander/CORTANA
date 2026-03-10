@@ -4,9 +4,11 @@ type LiveWsEvent =
   | { type: 'ready' }
   | { type: 'session_started'; sessionId: string; goal: string }
   | { type: 'vision_ack' }
+  | { type: 'audio_ack' }
+  | { type: 'transcript'; transcript: string }
   | { type: 'intent_update'; liveIntent: LiveIntent }
-  | { type: 'delta'; delta: string }
-  | { type: 'final'; reply: string; liveIntent: LiveIntent }
+  | { type: 'delta'; delta: string; source?: 'text' | 'audio' }
+  | { type: 'final'; reply: string; liveIntent: LiveIntent; source?: 'text' | 'audio' }
   | { type: 'interrupted' }
   | { type: 'error'; error: string };
 
@@ -22,6 +24,7 @@ export class LiveWsClient {
         onDelta?: (chunk: string, aggregate: string) => void;
       }
     | null = null;
+  private listeners = new Set<(event: LiveWsEvent) => void>();
 
   constructor(private readonly wsBase: string) {}
 
@@ -58,14 +61,32 @@ export class LiveWsClient {
         if (payload.type === 'session_started') {
           resolve();
         }
+        this.listeners.forEach((listener) => listener(payload));
         this.handleEvent(payload);
       };
     });
   }
 
+  onEvent(listener: (event: LiveWsEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
   sendVisionFrame(screenshotBase64: string) {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
     this.socket.send(JSON.stringify({ type: 'vision_frame', screenshotBase64 }));
+  }
+
+  sendAudioChunk(data: string, mimeType: string) {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    this.socket.send(JSON.stringify({ type: 'audio_chunk', data, mimeType }));
+  }
+
+  commitAudio() {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    this.socket.send(JSON.stringify({ type: 'audio_commit' }));
   }
 
   sendMessage(message: string, options?: { screenshotBase64?: string; onDelta?: (chunk: string, aggregate: string) => void }) {

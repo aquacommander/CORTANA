@@ -1,6 +1,7 @@
 import { IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { LiveIntent } from '../../frontend/shared/contracts.ts';
+import { transcribeAudioChunk } from './liveAudioService.ts';
 
 type ProcessMessageFn = (sessionId: string, message: string, screenshotBase64?: string) => Promise<{
   liveIntent: LiveIntent;
@@ -13,6 +14,7 @@ type ClientState = {
   socket: WebSocket;
   sessionId?: string;
   latestScreenshotBase64?: string;
+  latestAudioChunk?: { data: string; mimeType: string };
   streamToken: number;
 };
 
@@ -119,6 +121,7 @@ export function attachLiveWsGateway(params: {
           }
           safeSend(socket, {
             type: 'final',
+            source: 'text',
             reply: aggregate || result.reply,
             liveIntent: result.liveIntent,
           });
@@ -126,6 +129,62 @@ export function attachLiveWsGateway(params: {
           safeSend(socket, {
             type: 'error',
             error: error?.message || 'Unable to process user_message',
+          });
+        }
+      }
+
+      if (type === 'audio_chunk') {
+        const chunkData = String(data?.data || '').trim();
+        const mimeType = String(data?.mimeType || 'audio/webm').trim();
+        if (!chunkData) {
+          safeSend(socket, { type: 'error', error: 'audio_chunk.data is required' });
+          return;
+        }
+        state.latestAudioChunk = { data: chunkData, mimeType };
+        safeSend(socket, { type: 'audio_ack' });
+        return;
+      }
+
+      if (type === 'audio_commit') {
+        if (!state.sessionId) {
+          safeSend(socket, { type: 'error', error: 'start_session must be sent first' });
+          return;
+        }
+        if (!state.latestAudioChunk) {
+          safeSend(socket, { type: 'error', error: 'No audio chunk available to commit' });
+          return;
+        }
+        const transcript =
+          (await transcribeAudioChunk({
+            audioBase64: state.latestAudioChunk.data,
+            mimeType: state.latestAudioChunk.mimeType,
+            goal: params.resolveGoal(state.sessionId),
+          })) || '';
+        if (!transcript) {
+          safeSend(socket, {
+            type: 'error',
+            error: 'Audio transcription failed. Please speak again or use text input.',
+          });
+          return;
+        }
+        safeSend(socket, { type: 'transcript', transcript });
+        try {
+          const result = await params.processMessage(
+            state.sessionId,
+            transcript,
+            state.latestScreenshotBase64,
+          );
+          safeSend(socket, { type: 'intent_update', liveIntent: result.liveIntent });
+          safeSend(socket, {
+            type: 'final',
+            source: 'audio',
+            reply: result.reply,
+            liveIntent: result.liveIntent,
+          });
+        } catch (error: any) {
+          safeSend(socket, {
+            type: 'error',
+            error: error?.message || 'Unable to process audio_commit',
           });
         }
       }
