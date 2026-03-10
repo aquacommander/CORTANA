@@ -323,6 +323,10 @@ const App: React.FC = () => {
   const wsAudioStartedForTurnRef = useRef<boolean>(false);
   const audioMediaRecorderRef = useRef<any>(null);
   const audioMediaStreamRef = useRef<MediaStream | null>(null);
+  const pcmStreamContextRef = useRef<AudioContext | null>(null);
+  const pcmSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const pcmWorkletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const pcmSinkGainRef = useRef<GainNode | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const voiceAnalyserRef = useRef<AnalyserNode | null>(null);
   const voiceDataRef = useRef<Uint8Array | null>(null);
@@ -376,6 +380,7 @@ const App: React.FC = () => {
           // ignore
         }
       }
+      stopPcmStreaming();
       if (wsAudioElementRef.current) {
         try {
           wsAudioElementRef.current.pause();
@@ -628,6 +633,97 @@ const App: React.FC = () => {
       speakWithBrowserTts(replyText);
     }, 800);
   }
+
+  const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      const part = bytes.subarray(i, i + chunk);
+      binary += String.fromCharCode(...part);
+    }
+    return btoa(binary);
+  };
+
+  const stopPcmStreaming = () => {
+    try {
+      pcmWorkletNodeRef.current?.disconnect();
+    } catch {
+      // ignore
+    }
+    try {
+      pcmSourceNodeRef.current?.disconnect();
+    } catch {
+      // ignore
+    }
+    try {
+      pcmSinkGainRef.current?.disconnect();
+    } catch {
+      // ignore
+    }
+    if (pcmStreamContextRef.current) {
+      void pcmStreamContextRef.current.close().catch(() => undefined);
+    }
+    pcmWorkletNodeRef.current = null;
+    pcmSourceNodeRef.current = null;
+    pcmSinkGainRef.current = null;
+    pcmStreamContextRef.current = null;
+  };
+
+  const startPcmStreaming = async (stream: MediaStream): Promise<boolean> => {
+    const AudioContextImpl = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextImpl || typeof (window as any).AudioWorkletNode !== 'function') {
+      return false;
+    }
+    try {
+      stopPcmStreaming();
+      const context: AudioContext = new AudioContextImpl();
+      const workletUrl = new URL('./audio/pcm16-worklet.js', import.meta.url);
+      await context.audioWorklet.addModule(workletUrl);
+      const source = context.createMediaStreamSource(stream);
+      const worklet = new AudioWorkletNode(context, 'pcm16-worklet', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        channelCount: 1,
+        processorOptions: {
+          targetSampleRate: 16000,
+          frameSize: 2048,
+        },
+      });
+      const sink = context.createGain();
+      sink.gain.value = 0;
+      source.connect(worklet);
+      worklet.connect(sink);
+      sink.connect(context.destination);
+
+      worklet.port.onmessage = (event: MessageEvent<any>) => {
+        const payload = event.data || {};
+        const buffer: ArrayBuffer | undefined = payload.buffer;
+        if (!buffer || !liveWsRef.current) return;
+        const base64 = arrayBufferToBase64(buffer);
+        liveWsRef.current.sendAudioChunk(base64, {
+          mimeType: 'audio/pcm;rate=16000',
+          encoding: 'pcm_s16le',
+          sampleRate: 16000,
+          chunkSize: buffer.byteLength,
+        });
+        setMicChunksSent((prev) => prev + 1);
+      };
+
+      if (context.state === 'suspended') {
+        await context.resume();
+      }
+
+      pcmStreamContextRef.current = context;
+      pcmSourceNodeRef.current = source;
+      pcmWorkletNodeRef.current = worklet;
+      pcmSinkGainRef.current = sink;
+      return true;
+    } catch {
+      stopPcmStreaming();
+      return false;
+    }
+  };
 
   const stopVoiceActivityDetection = () => {
     if (voiceRafRef.current) {
@@ -993,28 +1089,41 @@ const App: React.FC = () => {
       await ensureWsConnected(activeSessionId);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioMediaStreamRef.current = stream;
-      const preferredType = (window as any).MediaRecorder?.isTypeSupported?.('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : 'audio/webm';
-      const recorder = new MediaRecorder(stream, { mimeType: preferredType });
-      audioMediaRecorderRef.current = recorder;
-      recorder.ondataavailable = async (event: BlobEvent) => {
-        if (!event.data || event.data.size === 0 || !liveWsRef.current) return;
-        const file = new File([event.data], `chunk-${Date.now()}.webm`, {
-          type: event.data.type || preferredType,
-        });
-        const base64WithPrefix = await fileToBase64(file);
-        const base64 = base64WithPrefix.replace(/^data:.*;base64,/, '');
-        liveWsRef.current.sendAudioChunk(base64, event.data.type || preferredType);
-        setMicChunksSent((prev) => prev + 1);
-      };
-      recorder.start(1200);
+      const usingPcmPath = await startPcmStreaming(stream);
+      if (!usingPcmPath) {
+        const preferredType = (window as any).MediaRecorder?.isTypeSupported?.('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : 'audio/webm';
+        const recorder = new MediaRecorder(stream, { mimeType: preferredType });
+        audioMediaRecorderRef.current = recorder;
+        recorder.ondataavailable = async (event: BlobEvent) => {
+          if (!event.data || event.data.size === 0 || !liveWsRef.current) return;
+          const file = new File([event.data], `chunk-${Date.now()}.webm`, {
+            type: event.data.type || preferredType,
+          });
+          const base64WithPrefix = await fileToBase64(file);
+          const base64 = base64WithPrefix.replace(/^data:.*;base64,/, '');
+          liveWsRef.current.sendAudioChunk(base64, {
+            mimeType: event.data.type || preferredType,
+            encoding: 'webm_opus',
+            chunkSize: event.data.size,
+          });
+          setMicChunksSent((prev) => prev + 1);
+        };
+        recorder.start(1200);
+      } else {
+        audioMediaRecorderRef.current = null;
+      }
       setMicChunksSent(0);
       setAudioBytesReceived(0);
       setLastBackendAudioAckBytes(0);
       await startVoiceActivityDetection(stream);
       setIsAudioStreaming(true);
-      setStatusMessage('Voice stream started. Speak naturally; replies are automatic after you pause.');
+      setStatusMessage(
+        usingPcmPath
+          ? 'Voice stream started (PCM 16k). Replies are automatic after you pause.'
+          : 'Voice stream started (webm fallback). Replies are automatic after you pause.',
+      );
     } catch (error: any) {
       setStatusMessage(error?.message || 'Unable to start voice stream');
       setIsAudioStreaming(false);
@@ -1036,6 +1145,7 @@ const App: React.FC = () => {
       // ignore
     }
     audioMediaRecorderRef.current = null;
+    stopPcmStreaming();
     if (audioMediaStreamRef.current) {
       audioMediaStreamRef.current.getTracks().forEach((track) => track.stop());
     }

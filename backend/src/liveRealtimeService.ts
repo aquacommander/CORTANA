@@ -38,7 +38,14 @@ async function tryOpenGeminiLiveConnection(ai: any, input: { goal: string }): Pr
         model: LIVE_MODEL,
         config: {
           systemInstruction: `You are a realtime campaign copilot. Goal: ${input.goal}`,
-          responseModalities: ['TEXT'],
+          responseModalities: ['TEXT', 'AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: (process.env.LIVE_AGENT_VOICE_NAME || '').trim() || 'Kore',
+              },
+            },
+          },
         },
       });
     }

@@ -35,6 +35,9 @@ type ClientState = {
   latestScreenshotBase64?: string;
   bufferedAudioChunks: string[];
   bufferedAudioMimeType: string;
+  bufferedAudioEncoding: string;
+  bufferedAudioSampleRate?: number;
+  bufferedAudioChunkSize?: number;
   audioListeningStarted: boolean;
   audioReceivedFrames: number;
   audioReceivedBytes: number;
@@ -147,6 +150,7 @@ export function attachLiveWsGateway(params: {
       streamToken: 0,
       bufferedAudioChunks: [],
       bufferedAudioMimeType: 'audio/webm',
+      bufferedAudioEncoding: 'unknown',
       audioListeningStarted: false,
       audioReceivedFrames: 0,
       audioReceivedBytes: 0,
@@ -343,14 +347,19 @@ export function attachLiveWsGateway(params: {
       if (type === 'audio_chunk') {
         const chunkData = String(data?.data || '').trim();
         const mimeType = String(data?.mimeType || 'audio/webm').trim();
-        const sampleRate = Number(data?.sampleRate || 0) || 16000;
-        const chunkSize = Number(data?.chunkSize || 0) || 2048;
-        const encoding = String(data?.encoding || 'pcm_s16le');
+        const sampleRateValue = Number(data?.sampleRate || 0);
+        const chunkSizeValue = Number(data?.chunkSize || 0);
+        const sampleRate = Number.isFinite(sampleRateValue) && sampleRateValue > 0 ? sampleRateValue : undefined;
+        const chunkSize = Number.isFinite(chunkSizeValue) && chunkSizeValue > 0 ? chunkSizeValue : undefined;
+        const encoding = String(data?.encoding || 'unknown');
         if (!chunkData) {
           safeSend(socket, { type: 'error', error: 'audio_chunk.data is required' });
           return;
         }
         state.bufferedAudioMimeType = mimeType || state.bufferedAudioMimeType;
+        state.bufferedAudioEncoding = encoding || state.bufferedAudioEncoding;
+        state.bufferedAudioSampleRate = sampleRate || state.bufferedAudioSampleRate;
+        state.bufferedAudioChunkSize = chunkSize || state.bufferedAudioChunkSize;
         state.bufferedAudioChunks.push(chunkData);
         if (state.bufferedAudioChunks.length > 24) {
           state.bufferedAudioChunks = state.bufferedAudioChunks.slice(-24);
@@ -362,9 +371,10 @@ export function attachLiveWsGateway(params: {
           state.audioListeningStarted = true;
           logInfo('audio.listening.started', {
             connectionId: state.connectionId,
-            sampleRate,
-            chunkSize,
-            encoding,
+            sampleRate: state.bufferedAudioSampleRate ?? null,
+            chunkSize: state.bufferedAudioChunkSize ?? null,
+            encoding: state.bufferedAudioEncoding,
+            mimeType: state.bufferedAudioMimeType,
           });
         }
         if (state.audioReceivedFrames % 25 === 0) {

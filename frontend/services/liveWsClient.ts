@@ -124,16 +124,24 @@ export class LiveWsClient {
     this.socket.send(JSON.stringify({ type: 'vision_frame', screenshotBase64 }));
   }
 
-  sendAudioChunk(data: string, mimeType: string) {
+  sendAudioChunk(
+    data: string,
+    input: {
+      mimeType: string;
+      encoding?: 'webm_opus' | 'pcm_s16le' | 'unknown';
+      sampleRate?: number;
+      chunkSize?: number;
+    },
+  ) {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
     this.socket.send(
       JSON.stringify({
         type: 'audio_chunk',
         data,
-        mimeType,
-        encoding: 'pcm_s16le',
-        chunkSize: 2048,
-        sampleRate: 16000,
+        mimeType: input.mimeType,
+        encoding: input.encoding || 'unknown',
+        chunkSize: input.chunkSize,
+        sampleRate: input.sampleRate,
       }),
     );
   }
