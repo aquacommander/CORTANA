@@ -319,6 +319,8 @@ const App: React.FC = () => {
   const liveWsRef = useRef<LiveWsClient | null>(null);
   const wsAudioBufferRef = useRef<{ streamId: string; mimeType: string; chunks: string[] } | null>(null);
   const wsAudioElementRef = useRef<HTMLAudioElement | null>(null);
+  const wsVoiceFallbackTimerRef = useRef<number | null>(null);
+  const wsAudioStartedForTurnRef = useRef<boolean>(false);
   const audioMediaRecorderRef = useRef<any>(null);
   const audioMediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -383,6 +385,7 @@ const App: React.FC = () => {
       }
       wsAudioElementRef.current = null;
       wsAudioBufferRef.current = null;
+      clearWsVoiceFallbackTimer();
       stopVoiceActivityDetection();
       audioMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
       if (cameraIntervalRef.current) clearInterval(cameraIntervalRef.current);
@@ -402,6 +405,7 @@ const App: React.FC = () => {
     if (!speakAgentReplies) {
       stopWsAudioPlayback();
       wsAudioBufferRef.current = null;
+      clearWsVoiceFallbackTimer();
     }
   }, [speakAgentReplies]);
 
@@ -596,6 +600,35 @@ const App: React.FC = () => {
     wsAudioElementRef.current = null;
   }
 
+  function clearWsVoiceFallbackTimer() {
+    if (wsVoiceFallbackTimerRef.current) {
+      clearTimeout(wsVoiceFallbackTimerRef.current);
+      wsVoiceFallbackTimerRef.current = null;
+    }
+  }
+
+  function speakWithBrowserTts(text?: string) {
+    if (!text || !speakAgentReplies || !('speechSynthesis' in window)) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // ignore speech synthesis errors
+    }
+  }
+
+  function scheduleWsVoiceFallback(replyText: string) {
+    clearWsVoiceFallbackTimer();
+    if (!speakAgentReplies) return;
+    wsVoiceFallbackTimerRef.current = window.setTimeout(() => {
+      if (wsAudioStartedForTurnRef.current) return;
+      speakWithBrowserTts(replyText);
+    }, 800);
+  }
+
   const stopVoiceActivityDetection = () => {
     if (voiceRafRef.current) {
       cancelAnimationFrame(voiceRafRef.current);
@@ -696,6 +729,8 @@ const App: React.FC = () => {
           setIntakeTranscript((prev) => [...prev, { role: 'user', content: event.transcript }]);
         } else if (event.type === 'audio_output_start') {
           if (!speakAgentReplies) return;
+          wsAudioStartedForTurnRef.current = true;
+          clearWsVoiceFallbackTimer();
           wsAudioBufferRef.current = {
             streamId: event.streamId,
             mimeType: event.mimeType || 'audio/wav',
@@ -727,26 +762,34 @@ const App: React.FC = () => {
           const fallback = event.fallbackReason ? ` | fallback: ${event.fallbackReason}` : '';
           setStatusMessage(`Live session connected: ${provider}${fallback}`);
         } else if (event.type === 'turn_started') {
+          wsAudioStartedForTurnRef.current = false;
+          clearWsVoiceFallbackTimer();
           setStatusMessage(`Live agent is processing ${event.source || 'input'}...`);
         } else if (event.type === 'audio_ack') {
           if (typeof event.bufferedChunks === 'number') {
             setStatusMessage(`Voice chunk received (${event.bufferedChunks} buffered)`);
             setLastBackendAudioAckBytes(event.bufferedChunks * 2048);
           }
-        } else if (event.type === 'final' && event.source === 'audio') {
-          liveVoiceStateRef.current.autoCommitLock = false;
-          appendAssistantMessage(event.reply);
-          setStatusMessage(event.reply);
-          applyLiveIntentToUi(event.liveIntent);
-          if (sessionId) {
-            refreshLoadedSession(sessionId).catch(() => undefined);
+        } else if (event.type === 'final') {
+          if (event.source === 'audio') {
+            liveVoiceStateRef.current.autoCommitLock = false;
+            appendAssistantMessage(event.reply);
+            setStatusMessage(event.reply);
+            applyLiveIntentToUi(event.liveIntent);
+            if (sessionId) {
+              refreshLoadedSession(sessionId).catch(() => undefined);
+            }
+          } else {
+            scheduleWsVoiceFallback(event.reply);
           }
         } else if (event.type === 'interrupted') {
           liveVoiceStateRef.current.autoCommitLock = false;
           stopWsAudioPlayback();
           wsAudioBufferRef.current = null;
+          clearWsVoiceFallbackTimer();
         } else if (event.type === 'error') {
           liveVoiceStateRef.current.autoCommitLock = false;
+          clearWsVoiceFallbackTimer();
           setStatusMessage(event.error);
         }
       });
@@ -882,16 +925,8 @@ const App: React.FC = () => {
           { role: 'assistant', content: `[Realtime] ${realtimeReply}` },
         ]);
       }
-      if (speakAgentReplies && 'speechSynthesis' in window && !useWebSocketLive) {
-        try {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(response.reply);
-          utterance.rate = 1;
-          utterance.pitch = 1;
-          window.speechSynthesis.speak(utterance);
-        } catch {
-          // ignore speech synthesis errors
-        }
+      if (speakAgentReplies && !useWebSocketLive) {
+        speakWithBrowserTts(response.reply);
       }
 
       if (response.liveIntent.readyForStoryGeneration) {
@@ -933,6 +968,7 @@ const App: React.FC = () => {
       liveWsRef.current?.interrupt();
     }
     stopWsAudioPlayback();
+    clearWsVoiceFallbackTimer();
     if ('speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -1322,6 +1358,7 @@ const App: React.FC = () => {
     handleStopCameraStream();
     stopWsAudioPlayback();
     wsAudioBufferRef.current = null;
+    clearWsVoiceFallbackTimer();
     liveWsRef.current?.close();
     setWsConnectionId('');
     setWsActiveModel('');
@@ -1566,6 +1603,7 @@ const App: React.FC = () => {
                       handleStopCameraStream();
                       stopWsAudioPlayback();
                       wsAudioBufferRef.current = null;
+                      clearWsVoiceFallbackTimer();
                       liveWsRef.current?.close();
                       setWsConnectionId('');
                       setWsActiveModel('');
@@ -1586,6 +1624,7 @@ const App: React.FC = () => {
                     } else {
                       stopWsAudioPlayback();
                       wsAudioBufferRef.current = null;
+                      clearWsVoiceFallbackTimer();
                       if ('speechSynthesis' in window) {
                         try {
                           window.speechSynthesis.cancel();
