@@ -1,6 +1,8 @@
 import cors from 'cors';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
+import { WebSocketServer } from 'ws';
 import {
   ExecutionResult,
   NavigatorPlan,
@@ -11,6 +13,7 @@ import { analyzeNavigatorTarget } from './navigatorAnalyzer.ts';
 import { executeNavigatorPlan } from './navigatorExecutor.ts';
 import { getKnowledgeContext } from './knowledgeService.ts';
 import { processLiveMessage } from './liveAgentService.ts';
+import { attachLiveWsGateway } from './liveWsGateway.ts';
 import {
   getRealtimeProviderMatrix,
   hasRealtimeSession,
@@ -550,8 +553,17 @@ app.post('/api/navigator/execute', async (req, res) => {
 
 async function startServer() {
   await store.initialize();
-  app.listen(PORT, () => {
+  const httpServer = createServer(app);
+  const wss = new WebSocketServer({ server: httpServer });
+  attachLiveWsGateway({
+    wss,
+    processMessage: processAndPersistLiveMessage,
+    resolveGoal: (sessionId: string) => getSessionOrThrow(sessionId).goal,
+  });
+
+  httpServer.listen(PORT, () => {
     console.log(`Backend server listening on http://localhost:${PORT}`);
+    console.log(`Live websocket endpoint: ws://localhost:${PORT}/api/live/ws`);
     console.log(`Loaded sessions: ${store.size}`);
   });
 }
