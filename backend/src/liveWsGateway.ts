@@ -28,10 +28,16 @@ type InterruptRealtimeFn = (liveSessionId: string) => Promise<void>;
 type StopRealtimeFn = (liveSessionId: string) => Promise<void>;
 
 type ClientState = {
+  connectionId: string;
+  remoteAddress: string;
+  clientId?: string;
   sessionId?: string;
   latestScreenshotBase64?: string;
   bufferedAudioChunks: string[];
   bufferedAudioMimeType: string;
+  audioListeningStarted: boolean;
+  audioReceivedFrames: number;
+  audioReceivedBytes: number;
   liveSessionId?: string;
   streamToken: number;
   turnQueue: Promise<void>;
@@ -40,6 +46,10 @@ type ClientState = {
 function safeSend(socket: WebSocket, payload: Record<string, unknown>) {
   if (socket.readyState !== socket.OPEN) return;
   socket.send(JSON.stringify(payload));
+}
+
+function logInfo(event: string, payload: Record<string, unknown>) {
+  console.log(`[${new Date().toISOString()}] [INFO] ${event} ${JSON.stringify(payload)}`);
 }
 
 function shouldUseRealtimeReply(reply?: string): boolean {
@@ -126,17 +136,26 @@ export function attachLiveWsGateway(params: {
 }) {
   params.wss.on('connection', (socket: WebSocket, req: IncomingMessage) => {
     const url = req.url || '';
-    if (!url.startsWith('/api/live/ws')) {
+    if (!url.startsWith('/api/live/ws') && !url.startsWith('/ws')) {
       socket.close();
       return;
     }
 
     const state: ClientState = {
+      connectionId: randomUUID(),
+      remoteAddress: String(req.socket.remoteAddress || 'unknown'),
       streamToken: 0,
       bufferedAudioChunks: [],
       bufferedAudioMimeType: 'audio/webm',
+      audioListeningStarted: false,
+      audioReceivedFrames: 0,
+      audioReceivedBytes: 0,
       turnQueue: Promise.resolve(),
     };
+    logInfo('ws.connection.opened', {
+      connectionId: state.connectionId,
+      remoteAddress: state.remoteAddress,
+    });
     safeSend(socket, { type: 'ready' });
 
     const interruptActiveTurn = async (notifyClient: boolean) => {
@@ -249,6 +268,10 @@ export function attachLiveWsGateway(params: {
               model: live.model,
               fallbackReason: live.fallbackReason,
             };
+            logInfo('gemini.session.ready', {
+              connectionId: state.connectionId,
+              model: live.model || 'unknown',
+            });
           }
           safeSend(socket, {
             type: 'session_started',
@@ -275,6 +298,21 @@ export function attachLiveWsGateway(params: {
         return;
       }
 
+      if (type === 'hello') {
+        const clientId = String(data?.clientId || '').trim();
+        if (!clientId) {
+          safeSend(socket, { type: 'error', error: 'clientId is required for hello' });
+          return;
+        }
+        state.clientId = clientId;
+        logInfo('ws.client.hello', {
+          connectionId: state.connectionId,
+          clientId,
+        });
+        safeSend(socket, { type: 'hello_ack', clientId, connectionId: state.connectionId });
+        return;
+      }
+
       if (type === 'interrupt') {
         await interruptActiveTurn(true);
         return;
@@ -288,6 +326,10 @@ export function attachLiveWsGateway(params: {
         }
         const screenshotBase64 =
           String(data?.screenshotBase64 || '').trim() || state.latestScreenshotBase64;
+        logInfo('gemini.text.prompt', {
+          connectionId: state.connectionId,
+          requestId: randomUUID(),
+        });
         await runUnifiedTurn({
           source: 'text',
           message,
@@ -301,6 +343,9 @@ export function attachLiveWsGateway(params: {
       if (type === 'audio_chunk') {
         const chunkData = String(data?.data || '').trim();
         const mimeType = String(data?.mimeType || 'audio/webm').trim();
+        const sampleRate = Number(data?.sampleRate || 0) || 16000;
+        const chunkSize = Number(data?.chunkSize || 0) || 2048;
+        const encoding = String(data?.encoding || 'pcm_s16le');
         if (!chunkData) {
           safeSend(socket, { type: 'error', error: 'audio_chunk.data is required' });
           return;
@@ -309,6 +354,25 @@ export function attachLiveWsGateway(params: {
         state.bufferedAudioChunks.push(chunkData);
         if (state.bufferedAudioChunks.length > 24) {
           state.bufferedAudioChunks = state.bufferedAudioChunks.slice(-24);
+        }
+        const chunkBytes = Buffer.from(stripBase64Prefix(chunkData), 'base64').length;
+        state.audioReceivedFrames += 1;
+        state.audioReceivedBytes += chunkBytes;
+        if (!state.audioListeningStarted) {
+          state.audioListeningStarted = true;
+          logInfo('audio.listening.started', {
+            connectionId: state.connectionId,
+            sampleRate,
+            chunkSize,
+            encoding,
+          });
+        }
+        if (state.audioReceivedFrames % 25 === 0) {
+          logInfo('audio.mic.progress', {
+            connectionId: state.connectionId,
+            receivedFrames: state.audioReceivedFrames,
+            receivedBytes: state.audioReceivedBytes,
+          });
         }
         safeSend(socket, { type: 'audio_ack', bufferedChunks: state.bufferedAudioChunks.length });
         return;
@@ -339,6 +403,10 @@ export function attachLiveWsGateway(params: {
           return;
         }
         safeSend(socket, { type: 'transcript', transcript });
+        logInfo('gemini.text.prompt', {
+          connectionId: state.connectionId,
+          requestId: randomUUID(),
+        });
         await runUnifiedTurn({
           source: 'audio',
           message: transcript,
@@ -354,6 +422,12 @@ export function attachLiveWsGateway(params: {
 
     socket.on('close', () => {
       state.bufferedAudioChunks = [];
+      logInfo('ws.connection.closed', {
+        connectionId: state.connectionId,
+        clientId: state.clientId || null,
+        receivedFrames: state.audioReceivedFrames,
+        receivedBytes: state.audioReceivedBytes,
+      });
       if (state.liveSessionId) {
         params.stopRealtime(state.liveSessionId).catch(() => undefined);
       }

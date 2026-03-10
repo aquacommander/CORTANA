@@ -2,6 +2,7 @@ import { LiveIntent } from '../shared/contracts';
 
 type LiveWsEvent =
   | { type: 'ready' }
+  | { type: 'hello_ack'; clientId: string; connectionId: string }
   | {
       type: 'session_started';
       sessionId: string;
@@ -27,6 +28,7 @@ type MessageResult = { reply: string; liveIntent: LiveIntent };
 
 export class LiveWsClient {
   private socket: WebSocket | null = null;
+  private readonly clientId: string;
   private currentSessionId: string | null = null;
   private sessionStartWaiter: { resolve: () => void; reject: (reason?: unknown) => void } | null = null;
   private pending:
@@ -39,7 +41,17 @@ export class LiveWsClient {
     | null = null;
   private listeners = new Set<(event: LiveWsEvent) => void>();
 
-  constructor(private readonly wsBase: string) {}
+  constructor(private readonly wsBase: string) {
+    this.clientId = globalThis.crypto?.randomUUID?.() || `client-${Date.now()}`;
+  }
+
+  private resolveWsUrl(): string {
+    const normalized = this.wsBase.replace(/\/+$/, '');
+    if (normalized.endsWith('/api/live/ws') || normalized.endsWith('/ws')) {
+      return normalized;
+    }
+    return `${normalized}/api/live/ws`;
+  }
 
   async connect(sessionId: string): Promise<void> {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
@@ -60,10 +72,11 @@ export class LiveWsClient {
       this.socket = null;
     }
 
-    const socket = new WebSocket(`${this.wsBase}/api/live/ws`);
+    const socket = new WebSocket(this.resolveWsUrl());
     this.socket = socket;
     await new Promise<void>((resolve, reject) => {
       socket.onopen = () => {
+        socket.send(JSON.stringify({ type: 'hello', clientId: this.clientId }));
         socket.send(JSON.stringify({ type: 'start_session', sessionId }));
       };
       socket.onerror = () => reject(new Error('WebSocket connection failed'));
@@ -113,7 +126,16 @@ export class LiveWsClient {
 
   sendAudioChunk(data: string, mimeType: string) {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
-    this.socket.send(JSON.stringify({ type: 'audio_chunk', data, mimeType }));
+    this.socket.send(
+      JSON.stringify({
+        type: 'audio_chunk',
+        data,
+        mimeType,
+        encoding: 'pcm_s16le',
+        chunkSize: 2048,
+        sampleRate: 16000,
+      }),
+    );
   }
 
   commitAudio() {
@@ -160,6 +182,10 @@ export class LiveWsClient {
     this.pending = null;
     this.currentSessionId = null;
     this.sessionStartWaiter = null;
+  }
+
+  getClientId(): string {
+    return this.clientId;
   }
 
   private parseEvent(raw: unknown): LiveWsEvent | null {

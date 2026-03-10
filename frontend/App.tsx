@@ -282,6 +282,12 @@ const App: React.FC = () => {
   const [useStreamingReplies, setUseStreamingReplies] = useState<boolean>(true);
   const [useWebSocketLive, setUseWebSocketLive] = useState<boolean>(true);
   const [isWsConnected, setIsWsConnected] = useState<boolean>(false);
+  const [wsClientId, setWsClientId] = useState<string>('');
+  const [wsConnectionId, setWsConnectionId] = useState<string>('');
+  const [wsActiveModel, setWsActiveModel] = useState<string>('');
+  const [micChunksSent, setMicChunksSent] = useState<number>(0);
+  const [audioBytesReceived, setAudioBytesReceived] = useState<number>(0);
+  const [lastBackendAudioAckBytes, setLastBackendAudioAckBytes] = useState<number>(0);
   const [isAudioStreaming, setIsAudioStreaming] = useState<boolean>(false);
   const [isCameraStreaming, setIsCameraStreaming] = useState<boolean>(false);
   const [speakAgentReplies, setSpeakAgentReplies] = useState<boolean>(false);
@@ -680,8 +686,11 @@ const App: React.FC = () => {
   const ensureWsConnected = async (activeSessionId: string) => {
     if (!liveWsRef.current) {
       liveWsRef.current = new LiveWsClient(liveWsBase);
+      setWsClientId(liveWsRef.current.getClientId());
       liveWsRef.current.onEvent((event) => {
-        if (event.type === 'transcript') {
+        if (event.type === 'hello_ack') {
+          setWsConnectionId(event.connectionId);
+        } else if (event.type === 'transcript') {
           liveVoiceStateRef.current.hasSpeechInTurn = false;
           liveVoiceStateRef.current.autoCommitLock = false;
           setIntakeTranscript((prev) => [...prev, { role: 'user', content: event.transcript }]);
@@ -696,6 +705,7 @@ const App: React.FC = () => {
           if (!speakAgentReplies) return;
           if (!wsAudioBufferRef.current || wsAudioBufferRef.current.streamId !== event.streamId) return;
           wsAudioBufferRef.current.chunks.push(event.data);
+          setAudioBytesReceived((prev) => prev + Math.floor((event.data.length * 3) / 4));
         } else if (event.type === 'audio_output_end') {
           const buffered = wsAudioBufferRef.current;
           wsAudioBufferRef.current = null;
@@ -712,6 +722,7 @@ const App: React.FC = () => {
             // ignore playback failures
           }
         } else if (event.type === 'session_started') {
+          setWsActiveModel(event.model || '');
           const provider = event.mode ? `${event.mode}${event.model ? ` (${event.model})` : ''}` : 'default';
           const fallback = event.fallbackReason ? ` | fallback: ${event.fallbackReason}` : '';
           setStatusMessage(`Live session connected: ${provider}${fallback}`);
@@ -720,6 +731,7 @@ const App: React.FC = () => {
         } else if (event.type === 'audio_ack') {
           if (typeof event.bufferedChunks === 'number') {
             setStatusMessage(`Voice chunk received (${event.bufferedChunks} buffered)`);
+            setLastBackendAudioAckBytes(event.bufferedChunks * 2048);
           }
         } else if (event.type === 'final' && event.source === 'audio') {
           liveVoiceStateRef.current.autoCommitLock = false;
@@ -958,8 +970,12 @@ const App: React.FC = () => {
         const base64WithPrefix = await fileToBase64(file);
         const base64 = base64WithPrefix.replace(/^data:.*;base64,/, '');
         liveWsRef.current.sendAudioChunk(base64, event.data.type || preferredType);
+        setMicChunksSent((prev) => prev + 1);
       };
       recorder.start(1200);
+      setMicChunksSent(0);
+      setAudioBytesReceived(0);
+      setLastBackendAudioAckBytes(0);
       await startVoiceActivityDetection(stream);
       setIsAudioStreaming(true);
       setStatusMessage('Voice stream started. Speak naturally; replies are automatic after you pause.');
@@ -1307,6 +1323,8 @@ const App: React.FC = () => {
     stopWsAudioPlayback();
     wsAudioBufferRef.current = null;
     liveWsRef.current?.close();
+    setWsConnectionId('');
+    setWsActiveModel('');
     setIsWsConnected(false);
     setState(AppState.IDLE);
     setVideoSrc(null);
@@ -1549,6 +1567,8 @@ const App: React.FC = () => {
                       stopWsAudioPlayback();
                       wsAudioBufferRef.current = null;
                       liveWsRef.current?.close();
+                      setWsConnectionId('');
+                      setWsActiveModel('');
                       setIsWsConnected(false);
                     }
                   }}
@@ -1598,6 +1618,22 @@ const App: React.FC = () => {
                 >
                   Stop Realtime
                 </button>
+                {wsClientId ? (
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">Client ID: {wsClientId}</p>
+                ) : null}
+                {wsConnectionId ? (
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">Connection ID: {wsConnectionId}</p>
+                ) : null}
+                {wsActiveModel ? (
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">Active model: {wsActiveModel}</p>
+                ) : null}
+                <p className="text-xs text-stone-500 dark:text-zinc-400">Mic chunks sent: {micChunksSent}</p>
+                <p className="text-xs text-stone-500 dark:text-zinc-400">
+                  Audio bytes received: {audioBytesReceived}
+                </p>
+                <p className="text-xs text-stone-500 dark:text-zinc-400">
+                  Last backend audio ack: {lastBackendAudioAckBytes} bytes
+                </p>
                 {loadedSession?.liveIntent?.missingFields && loadedSession.liveIntent.missingFields.length > 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
                     Missing fields: {loadedSession.liveIntent.missingFields.join(', ')}
