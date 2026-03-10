@@ -17,7 +17,9 @@ import { attachLiveWsGateway } from './liveWsGateway.ts';
 import {
   getRealtimeProviderMatrix,
   hasRealtimeSession,
+  interruptRealtimeSession,
   sendRealtimeMessage,
+  sendRealtimeTurn,
   startRealtimeSession,
   stopRealtimeSession,
 } from './liveRealtimeService.ts';
@@ -559,6 +561,12 @@ async function startServer() {
     wss,
     processMessage: processAndPersistLiveMessage,
     resolveGoal: (sessionId: string) => getSessionOrThrow(sessionId).goal,
+    startRealtime: async (sessionId: string, goal: string) => {
+      return startRealtimeSession({ sessionId, goal });
+    },
+    sendRealtime: sendRealtimeTurn,
+    interruptRealtime: interruptRealtimeSession,
+    stopRealtime: stopRealtimeSession,
   });
 
   httpServer.listen(PORT, () => {

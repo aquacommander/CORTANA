@@ -2,10 +2,21 @@ import { LiveIntent } from '../shared/contracts';
 
 type LiveWsEvent =
   | { type: 'ready' }
-  | { type: 'session_started'; sessionId: string; goal: string }
+  | {
+      type: 'session_started';
+      sessionId: string;
+      goal: string;
+      mode?: string;
+      model?: string;
+      fallbackReason?: string;
+    }
   | { type: 'vision_ack' }
-  | { type: 'audio_ack' }
+  | { type: 'audio_ack'; bufferedChunks?: number }
+  | { type: 'audio_output_start'; streamId: string; mimeType?: string; provider?: string }
+  | { type: 'audio_output_frame'; streamId: string; data: string; seq?: number }
+  | { type: 'audio_output_end'; streamId: string; interrupted?: boolean }
   | { type: 'transcript'; transcript: string }
+  | { type: 'turn_started'; source?: 'text' | 'audio' }
   | { type: 'intent_update'; liveIntent: LiveIntent }
   | { type: 'delta'; delta: string; source?: 'text' | 'audio' }
   | { type: 'final'; reply: string; liveIntent: LiveIntent; source?: 'text' | 'audio' }
@@ -16,6 +27,8 @@ type MessageResult = { reply: string; liveIntent: LiveIntent };
 
 export class LiveWsClient {
   private socket: WebSocket | null = null;
+  private currentSessionId: string | null = null;
+  private sessionStartWaiter: { resolve: () => void; reject: (reason?: unknown) => void } | null = null;
   private pending:
     | {
         resolve: (value: MessageResult) => void;
@@ -30,7 +43,12 @@ export class LiveWsClient {
 
   async connect(sessionId: string): Promise<void> {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ type: 'start_session', sessionId }));
+      if (this.currentSessionId === sessionId) return;
+      await new Promise<void>((resolve, reject) => {
+        this.sessionStartWaiter = { resolve, reject };
+        this.socket!.send(JSON.stringify({ type: 'start_session', sessionId }));
+      });
+      this.currentSessionId = sessionId;
       return;
     }
     if (this.socket) {
@@ -50,16 +68,30 @@ export class LiveWsClient {
       };
       socket.onerror = () => reject(new Error('WebSocket connection failed'));
       socket.onclose = () => {
+        if (this.sessionStartWaiter) {
+          this.sessionStartWaiter.reject(new Error('WebSocket closed before session start'));
+          this.sessionStartWaiter = null;
+        }
         if (this.pending) {
           this.pending.reject(new Error('WebSocket closed'));
           this.pending = null;
         }
+        this.currentSessionId = null;
       };
       socket.onmessage = (event) => {
         const payload = this.parseEvent(event.data);
         if (!payload) return;
         if (payload.type === 'session_started') {
+          this.currentSessionId = payload.sessionId;
+          if (this.sessionStartWaiter) {
+            this.sessionStartWaiter.resolve();
+            this.sessionStartWaiter = null;
+          }
           resolve();
+        }
+        if (payload.type === 'error' && this.sessionStartWaiter) {
+          this.sessionStartWaiter.reject(new Error(payload.error));
+          this.sessionStartWaiter = null;
         }
         this.listeners.forEach((listener) => listener(payload));
         this.handleEvent(payload);
@@ -126,6 +158,8 @@ export class LiveWsClient {
     }
     this.socket = null;
     this.pending = null;
+    this.currentSessionId = null;
+    this.sessionStartWaiter = null;
   }
 
   private parseEvent(raw: unknown): LiveWsEvent | null {
