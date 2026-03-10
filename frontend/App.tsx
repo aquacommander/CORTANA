@@ -315,6 +315,21 @@ const App: React.FC = () => {
   const wsAudioElementRef = useRef<HTMLAudioElement | null>(null);
   const audioMediaRecorderRef = useRef<any>(null);
   const audioMediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const voiceAnalyserRef = useRef<AnalyserNode | null>(null);
+  const voiceDataRef = useRef<Uint8Array | null>(null);
+  const voiceRafRef = useRef<number | null>(null);
+  const liveVoiceStateRef = useRef<{
+    isUserSpeaking: boolean;
+    hasSpeechInTurn: boolean;
+    lastVoiceAtMs: number;
+    autoCommitLock: boolean;
+  }>({
+    isUserSpeaking: false,
+    hasSpeechInTurn: false,
+    lastVoiceAtMs: 0,
+    autoCommitLock: false,
+  });
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraIntervalRef = useRef<any>(null);
@@ -362,6 +377,7 @@ const App: React.FC = () => {
       }
       wsAudioElementRef.current = null;
       wsAudioBufferRef.current = null;
+      stopVoiceActivityDetection();
       audioMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
       if (cameraIntervalRef.current) clearInterval(cameraIntervalRef.current);
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -382,6 +398,11 @@ const App: React.FC = () => {
       wsAudioBufferRef.current = null;
     }
   }, [speakAgentReplies]);
+
+  useEffect(() => {
+    if (!speakAgentReplies || !useWebSocketLive || isAudioStreaming) return;
+    void handleStartAudioStream();
+  }, [speakAgentReplies, useWebSocketLive, isAudioStreaming]);
 
   const handleSelectKey = async () => {
     if (hasConfiguredApiKey()) {
@@ -569,11 +590,100 @@ const App: React.FC = () => {
     wsAudioElementRef.current = null;
   }
 
+  const stopVoiceActivityDetection = () => {
+    if (voiceRafRef.current) {
+      cancelAnimationFrame(voiceRafRef.current);
+      voiceRafRef.current = null;
+    }
+    if (audioContextRef.current) {
+      void audioContextRef.current.close().catch(() => undefined);
+      audioContextRef.current = null;
+    }
+    voiceAnalyserRef.current = null;
+    voiceDataRef.current = null;
+    liveVoiceStateRef.current = {
+      isUserSpeaking: false,
+      hasSpeechInTurn: false,
+      lastVoiceAtMs: 0,
+      autoCommitLock: false,
+    };
+  };
+
+  const startVoiceActivityDetection = async (stream: MediaStream) => {
+    stopVoiceActivityDetection();
+    const AudioContextImpl = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextImpl) return;
+    const context: AudioContext = new AudioContextImpl();
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.35;
+    source.connect(analyser);
+    audioContextRef.current = context;
+    voiceAnalyserRef.current = analyser;
+    voiceDataRef.current = new Uint8Array(analyser.fftSize);
+
+    const voiceThreshold = 0.018;
+    const silenceMsToCommit = 1200;
+    const minSpeakingMs = 200;
+    let speakingSinceMs = 0;
+
+    const tick = () => {
+      const currentAnalyser = voiceAnalyserRef.current;
+      const currentData = voiceDataRef.current;
+      if (!currentAnalyser || !currentData) return;
+      currentAnalyser.getByteTimeDomainData(currentData);
+      let sum = 0;
+      for (let i = 0; i < currentData.length; i += 1) {
+        const normalized = (currentData[i] - 128) / 128;
+        sum += normalized * normalized;
+      }
+      const rms = Math.sqrt(sum / currentData.length);
+      const now = Date.now();
+      const state = liveVoiceStateRef.current;
+      const speakingNow = rms > voiceThreshold;
+
+      if (speakingNow) {
+        if (!state.isUserSpeaking) {
+          state.isUserSpeaking = true;
+          speakingSinceMs = now;
+          stopWsAudioPlayback();
+          if ('speechSynthesis' in window) {
+            try {
+              window.speechSynthesis.cancel();
+            } catch {
+              // ignore
+            }
+          }
+          liveWsRef.current?.interrupt();
+          setStatusMessage('Listening...');
+        }
+        state.lastVoiceAtMs = now;
+        if (now - speakingSinceMs >= minSpeakingMs) {
+          state.hasSpeechInTurn = true;
+        }
+      } else if (state.isUserSpeaking && now - state.lastVoiceAtMs >= silenceMsToCommit) {
+        state.isUserSpeaking = false;
+        if (state.hasSpeechInTurn && !state.autoCommitLock) {
+          state.autoCommitLock = true;
+          liveWsRef.current?.commitAudio();
+          setStatusMessage('Processing your spoken request...');
+        }
+      }
+
+      voiceRafRef.current = requestAnimationFrame(tick);
+    };
+
+    voiceRafRef.current = requestAnimationFrame(tick);
+  };
+
   const ensureWsConnected = async (activeSessionId: string) => {
     if (!liveWsRef.current) {
       liveWsRef.current = new LiveWsClient(liveWsBase);
       liveWsRef.current.onEvent((event) => {
         if (event.type === 'transcript') {
+          liveVoiceStateRef.current.hasSpeechInTurn = false;
+          liveVoiceStateRef.current.autoCommitLock = false;
           setIntakeTranscript((prev) => [...prev, { role: 'user', content: event.transcript }]);
         } else if (event.type === 'audio_output_start') {
           if (!speakAgentReplies) return;
@@ -612,6 +722,7 @@ const App: React.FC = () => {
             setStatusMessage(`Voice chunk received (${event.bufferedChunks} buffered)`);
           }
         } else if (event.type === 'final' && event.source === 'audio') {
+          liveVoiceStateRef.current.autoCommitLock = false;
           appendAssistantMessage(event.reply);
           setStatusMessage(event.reply);
           applyLiveIntentToUi(event.liveIntent);
@@ -619,9 +730,11 @@ const App: React.FC = () => {
             refreshLoadedSession(sessionId).catch(() => undefined);
           }
         } else if (event.type === 'interrupted') {
+          liveVoiceStateRef.current.autoCommitLock = false;
           stopWsAudioPlayback();
           wsAudioBufferRef.current = null;
         } else if (event.type === 'error') {
+          liveVoiceStateRef.current.autoCommitLock = false;
           setStatusMessage(event.error);
         }
       });
@@ -847,8 +960,9 @@ const App: React.FC = () => {
         liveWsRef.current.sendAudioChunk(base64, event.data.type || preferredType);
       };
       recorder.start(1200);
+      await startVoiceActivityDetection(stream);
       setIsAudioStreaming(true);
-      setStatusMessage('Voice stream started. Speak naturally, then click "Commit Voice Turn".');
+      setStatusMessage('Voice stream started. Speak naturally; replies are automatic after you pause.');
     } catch (error: any) {
       setStatusMessage(error?.message || 'Unable to start voice stream');
       setIsAudioStreaming(false);
@@ -874,6 +988,7 @@ const App: React.FC = () => {
       audioMediaStreamRef.current.getTracks().forEach((track) => track.stop());
     }
     audioMediaStreamRef.current = null;
+    stopVoiceActivityDetection();
     setIsAudioStreaming(false);
   };
 
@@ -1443,7 +1558,26 @@ const App: React.FC = () => {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSpeakAgentReplies((prev) => !prev)}
+                  onClick={() => {
+                    const next = !speakAgentReplies;
+                    setSpeakAgentReplies(next);
+                    if (next) {
+                      setStatusMessage('Agent voice enabled. Live listening will start automatically.');
+                    } else {
+                      stopWsAudioPlayback();
+                      wsAudioBufferRef.current = null;
+                      if ('speechSynthesis' in window) {
+                        try {
+                          window.speechSynthesis.cancel();
+                        } catch {
+                          // ignore
+                        }
+                      }
+                      if (isAudioStreaming) {
+                        handleStopAudioStream();
+                      }
+                    }
+                  }}
                   className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800"
                 >
                   {speakAgentReplies ? 'Agent Voice: On' : 'Agent Voice: Off'}
