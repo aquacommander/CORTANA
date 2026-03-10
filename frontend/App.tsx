@@ -282,6 +282,8 @@ const App: React.FC = () => {
   const [useStreamingReplies, setUseStreamingReplies] = useState<boolean>(true);
   const [useWebSocketLive, setUseWebSocketLive] = useState<boolean>(true);
   const [isWsConnected, setIsWsConnected] = useState<boolean>(false);
+  const [isAudioStreaming, setIsAudioStreaming] = useState<boolean>(false);
+  const [isCameraStreaming, setIsCameraStreaming] = useState<boolean>(false);
   const [speakAgentReplies, setSpeakAgentReplies] = useState<boolean>(false);
   const [isRegeneratingBlock, setIsRegeneratingBlock] = useState<boolean>(false);
 
@@ -309,6 +311,11 @@ const App: React.FC = () => {
   const intakeAbortRef = useRef<AbortController | null>(null);
   const intakeRecognitionRef = useRef<any>(null);
   const liveWsRef = useRef<LiveWsClient | null>(null);
+  const audioMediaRecorderRef = useRef<any>(null);
+  const audioMediaStreamRef = useRef<MediaStream | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraIntervalRef = useRef<any>(null);
 
   useEffect(() => {
     if (state === AppState.GENERATING_IMAGE || state === AppState.GENERATING_VIDEO || state === AppState.PLAYING) {
@@ -337,6 +344,16 @@ const App: React.FC = () => {
   useEffect(() => {
     return () => {
       intakeAbortRef.current?.abort();
+      if (audioMediaRecorderRef.current && audioMediaRecorderRef.current.state !== 'inactive') {
+        try {
+          audioMediaRecorderRef.current.stop();
+        } catch {
+          // ignore
+        }
+      }
+      audioMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      if (cameraIntervalRef.current) clearInterval(cameraIntervalRef.current);
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
       liveWsRef.current?.close();
       if (intakeRecognitionRef.current) {
         try {
@@ -511,6 +528,54 @@ const App: React.FC = () => {
     }
   };
 
+  const applyLiveIntentToUi = (intent: LiveIntent) => {
+    if (intent.readyForStoryGeneration) {
+      setWorkflowStageOverride('STORY_GENERATION');
+    } else {
+      setWorkflowStageOverride('INTAKE');
+    }
+  };
+
+  const appendAssistantMessage = (content: string) => {
+    setIntakeTranscript((prev) => [...prev, { role: 'assistant', content }]);
+  };
+
+  const ensureWsConnected = async (activeSessionId: string) => {
+    if (!liveWsRef.current) {
+      liveWsRef.current = new LiveWsClient(liveWsBase);
+      liveWsRef.current.onEvent((event) => {
+        if (event.type === 'transcript') {
+          setIntakeTranscript((prev) => [...prev, { role: 'user', content: event.transcript }]);
+        } else if (event.type === 'final' && event.source === 'audio') {
+          appendAssistantMessage(event.reply);
+          setStatusMessage(event.reply);
+          applyLiveIntentToUi(event.liveIntent);
+          if (speakAgentReplies && 'speechSynthesis' in window) {
+            try {
+              window.speechSynthesis.cancel();
+              const utterance = new SpeechSynthesisUtterance(event.reply);
+              utterance.rate = 1;
+              utterance.pitch = 1;
+              window.speechSynthesis.speak(utterance);
+            } catch {
+              // ignore
+            }
+          }
+          if (sessionId) {
+            refreshLoadedSession(sessionId).catch(() => undefined);
+          }
+        } else if (event.type === 'error') {
+          setStatusMessage(event.error);
+        }
+      });
+    }
+    await liveWsRef.current.connect(activeSessionId);
+    setIsWsConnected(true);
+    if (referenceImage) {
+      liveWsRef.current.sendVisionFrame(referenceImage.split(',')[1] || referenceImage);
+    }
+  };
+
   const handleSendIntakeMessage = async () => {
     const message = intakeMessage.trim();
     if (!message) return;
@@ -558,15 +623,8 @@ const App: React.FC = () => {
       }
       const screenshotBase64 = referenceImage ? referenceImage.split(',')[1] || undefined : undefined;
       if (useWebSocketLive) {
-        if (!liveWsRef.current) {
-          liveWsRef.current = new LiveWsClient(liveWsBase);
-        }
         try {
-          await liveWsRef.current.connect(activeSessionId);
-          setIsWsConnected(true);
-          if (screenshotBase64) {
-            liveWsRef.current.sendVisionFrame(screenshotBase64);
-          }
+          await ensureWsConnected(activeSessionId);
           response = await liveWsRef.current.sendMessage(message, {
             screenshotBase64,
             onDelta: (_chunk, aggregate) => updateLatestAssistantMessage(aggregate),
@@ -692,9 +750,126 @@ const App: React.FC = () => {
     if (useWebSocketLive) {
       liveWsRef.current?.interrupt();
     }
+    if ('speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
+    }
     setIsSendingIntake(false);
     setIsAgentTyping(false);
     setStatusMessage('Intake interrupted. You can send a new message now.');
+  };
+
+  const handleStartAudioStream = async () => {
+    try {
+      let activeSessionId = sessionId;
+      if (!activeSessionId) {
+        const { session } = await apiClient.createSession(intakeMessage.trim() || 'Live voice intake');
+        activeSessionId = session.sessionId;
+        setSessionId(activeSessionId);
+        setSessionLookupId(activeSessionId);
+      }
+      await ensureWsConnected(activeSessionId);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioMediaStreamRef.current = stream;
+      const preferredType = (window as any).MediaRecorder?.isTypeSupported?.('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+      const recorder = new MediaRecorder(stream, { mimeType: preferredType });
+      audioMediaRecorderRef.current = recorder;
+      recorder.ondataavailable = async (event: BlobEvent) => {
+        if (!event.data || event.data.size === 0 || !liveWsRef.current) return;
+        const file = new File([event.data], `chunk-${Date.now()}.webm`, {
+          type: event.data.type || preferredType,
+        });
+        const base64WithPrefix = await fileToBase64(file);
+        const base64 = base64WithPrefix.replace(/^data:.*;base64,/, '');
+        liveWsRef.current.sendAudioChunk(base64, event.data.type || preferredType);
+      };
+      recorder.start(1200);
+      setIsAudioStreaming(true);
+      setStatusMessage('Voice stream started. Speak naturally, then click "Commit Voice Turn".');
+    } catch (error: any) {
+      setStatusMessage(error?.message || 'Unable to start voice stream');
+      setIsAudioStreaming(false);
+    }
+  };
+
+  const handleCommitAudioTurn = () => {
+    if (!liveWsRef.current) return;
+    liveWsRef.current.commitAudio();
+    setStatusMessage('Processing your spoken request...');
+  };
+
+  const handleStopAudioStream = () => {
+    try {
+      if (audioMediaRecorderRef.current && audioMediaRecorderRef.current.state !== 'inactive') {
+        audioMediaRecorderRef.current.stop();
+      }
+    } catch {
+      // ignore
+    }
+    audioMediaRecorderRef.current = null;
+    if (audioMediaStreamRef.current) {
+      audioMediaStreamRef.current.getTracks().forEach((track) => track.stop());
+    }
+    audioMediaStreamRef.current = null;
+    setIsAudioStreaming(false);
+  };
+
+  const handleStartCameraStream = async () => {
+    try {
+      let activeSessionId = sessionId;
+      if (!activeSessionId) {
+        const { session } = await apiClient.createSession(intakeMessage.trim() || 'Live camera intake');
+        activeSessionId = session.sessionId;
+        setSessionId(activeSessionId);
+        setSessionLookupId(activeSessionId);
+      }
+      await ensureWsConnected(activeSessionId);
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      cameraStreamRef.current = stream;
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      await video.play();
+      cameraVideoRef.current = video;
+
+      const canvas = document.createElement('canvas');
+      cameraIntervalRef.current = window.setInterval(() => {
+        if (!cameraVideoRef.current || !liveWsRef.current) return;
+        const width = cameraVideoRef.current.videoWidth || 640;
+        const height = cameraVideoRef.current.videoHeight || 360;
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(cameraVideoRef.current, 0, 0, width, height);
+        const frameBase64 = canvas.toDataURL('image/jpeg', 0.6).replace(/^data:image\/jpeg;base64,/, '');
+        liveWsRef.current.sendVisionFrame(frameBase64);
+      }, 1200);
+      setIsCameraStreaming(true);
+      setStatusMessage('Camera stream started. The live agent now receives visual context.');
+    } catch (error: any) {
+      setStatusMessage(error?.message || 'Unable to start camera stream');
+      setIsCameraStreaming(false);
+    }
+  };
+
+  const handleStopCameraStream = () => {
+    if (cameraIntervalRef.current) {
+      clearInterval(cameraIntervalRef.current);
+      cameraIntervalRef.current = null;
+    }
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+    cameraVideoRef.current = null;
+    setIsCameraStreaming(false);
   };
 
   const handleStartListening = () => {
@@ -954,6 +1129,8 @@ const App: React.FC = () => {
     if (liveRealtimeSessionId) {
       apiClient.stopRealtimeLiveSession(liveRealtimeSessionId).catch(() => undefined);
     }
+    handleStopAudioStream();
+    handleStopCameraStream();
     liveWsRef.current?.close();
     setIsWsConnected(false);
     setState(AppState.IDLE);
@@ -968,6 +1145,8 @@ const App: React.FC = () => {
     setScreenRecording(null);
     setLiveRealtimeSessionId(null);
     setUseRealtimeLive(false);
+    setIsAudioStreaming(false);
+    setIsCameraStreaming(false);
   };
 
   const handleDownload = () => {
@@ -1132,6 +1311,46 @@ const App: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  onClick={handleStartAudioStream}
+                  disabled={isAudioStreaming || !useWebSocketLive}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  {isAudioStreaming ? 'Voice Stream: On' : 'Start Voice Stream'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCommitAudioTurn}
+                  disabled={!isAudioStreaming || !useWebSocketLive}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Commit Voice Turn
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStopAudioStream}
+                  disabled={!isAudioStreaming}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Stop Voice Stream
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStartCameraStream}
+                  disabled={isCameraStreaming || !useWebSocketLive}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  {isCameraStreaming ? 'Camera: On' : 'Start Camera Stream'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStopCameraStream}
+                  disabled={!isCameraStreaming}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Stop Camera Stream
+                </button>
+                <button
+                  type="button"
                   onClick={handleInterruptIntake}
                   disabled={!isSendingIntake}
                   className="px-3 py-1.5 rounded-lg border border-amber-300 text-amber-700 dark:border-amber-700 dark:text-amber-300 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-900/20 disabled:opacity-50"
@@ -1150,6 +1369,8 @@ const App: React.FC = () => {
                   onClick={() => {
                     setUseWebSocketLive((prev) => !prev);
                     if (useWebSocketLive) {
+                      handleStopAudioStream();
+                      handleStopCameraStream();
                       liveWsRef.current?.close();
                       setIsWsConnected(false);
                     }
