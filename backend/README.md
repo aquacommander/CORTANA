@@ -11,6 +11,7 @@ This folder contains the workflow/session backend used by the frontend.
 - `POST /api/session/:sessionId/restart-from-review`
 - `POST /api/live/message`
 - `POST /api/live/message-stream`
+- `WS /api/live/ws` (bidirectional low-latency live intake transport)
 - `POST /api/live/realtime/session/start`
 - `POST /api/live/realtime/session/:liveSessionId/message`
 - `POST /api/live/realtime/session/:liveSessionId/stop`
@@ -47,6 +48,9 @@ Optional safety guardrail:
   `readyForStoryGeneration=true` after objective/audience/tone/platform are captured.
 - `POST /api/live/message-stream` returns a near-live NDJSON stream with incremental
   reply chunks (`delta`) and a final structured payload (`final` with `liveIntent` + `reply`).
+- `WS /api/live/ws` supports events:
+  - client -> server: `start_session`, `vision_frame`, `user_message`, `interrupt`
+  - server -> client: `ready`, `session_started`, `vision_ack`, `intent_update`, `delta`, `final`, `interrupted`, `error`
 - Realtime session endpoints support provider modes via env:
   - `LIVE_AGENT_PROVIDER=gemini_live|adk_compatible|genai_fallback`
   - `GEMINI_LIVE_MODEL` (default: `gemini-live-2.5-flash-preview`)

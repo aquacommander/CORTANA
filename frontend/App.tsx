@@ -8,6 +8,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AppState, WorkflowViewState } from './types';
 import { generateTextImage, generateTextVideo, generateStyleSuggestion } from './services/geminiService';
 import { apiClient } from './services/apiClient';
+import { LiveWsClient } from './services/liveWsClient';
 import { getRandomStyle, fileToBase64, TYPOGRAPHY_SUGGESTIONS, createGifFromVideo } from './utils';
 import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck } from 'lucide-react';
 import { LiveIntent, Session, WorkflowStage } from './shared/contracts';
@@ -21,6 +22,7 @@ interface Video {
 }
 
 const staticFilesUrl = 'https://www.gstatic.com/aistudio/starter-apps/type-motion/';
+const liveWsBase = (import.meta as any).env?.VITE_LIVE_WS_BASE || 'ws://localhost:8787';
 
 type AiStudioBridge = {
   hasSelectedApiKey?: () => Promise<boolean>;
@@ -278,6 +280,8 @@ const App: React.FC = () => {
   const [isListeningIntake, setIsListeningIntake] = useState<boolean>(false);
   const [isAgentTyping, setIsAgentTyping] = useState<boolean>(false);
   const [useStreamingReplies, setUseStreamingReplies] = useState<boolean>(true);
+  const [useWebSocketLive, setUseWebSocketLive] = useState<boolean>(true);
+  const [isWsConnected, setIsWsConnected] = useState<boolean>(false);
   const [speakAgentReplies, setSpeakAgentReplies] = useState<boolean>(false);
   const [isRegeneratingBlock, setIsRegeneratingBlock] = useState<boolean>(false);
 
@@ -304,6 +308,7 @@ const App: React.FC = () => {
   const recordingInputRef = useRef<HTMLInputElement>(null);
   const intakeAbortRef = useRef<AbortController | null>(null);
   const intakeRecognitionRef = useRef<any>(null);
+  const liveWsRef = useRef<LiveWsClient | null>(null);
 
   useEffect(() => {
     if (state === AppState.GENERATING_IMAGE || state === AppState.GENERATING_VIDEO || state === AppState.PLAYING) {
@@ -332,6 +337,7 @@ const App: React.FC = () => {
   useEffect(() => {
     return () => {
       intakeAbortRef.current?.abort();
+      liveWsRef.current?.close();
       if (intakeRecognitionRef.current) {
         try {
           intakeRecognitionRef.current.stop();
@@ -550,13 +556,62 @@ const App: React.FC = () => {
           // keep primary flow reliable even if realtime preview fails
         }
       }
-      if (useStreamingReplies) {
+      const screenshotBase64 = referenceImage ? referenceImage.split(',')[1] || undefined : undefined;
+      if (useWebSocketLive) {
+        if (!liveWsRef.current) {
+          liveWsRef.current = new LiveWsClient(liveWsBase);
+        }
+        try {
+          await liveWsRef.current.connect(activeSessionId);
+          setIsWsConnected(true);
+          if (screenshotBase64) {
+            liveWsRef.current.sendVisionFrame(screenshotBase64);
+          }
+          response = await liveWsRef.current.sendMessage(message, {
+            screenshotBase64,
+            onDelta: (_chunk, aggregate) => updateLatestAssistantMessage(aggregate),
+          });
+        } catch (wsError: any) {
+          setIsWsConnected(false);
+          // fallback to HTTP flow automatically when websocket path fails
+          if (useStreamingReplies) {
+            let aggregateReply = '';
+            response = await apiClient.sendLiveMessageStream(
+              {
+                sessionId: activeSessionId,
+                message,
+                screenshotBase64,
+              },
+              {
+                signal: controller.signal,
+                onDelta: (chunk) => {
+                  aggregateReply += chunk;
+                  updateLatestAssistantMessage(aggregateReply);
+                },
+              },
+            );
+          } else {
+            response = await apiClient.sendLiveMessage(
+              {
+                sessionId: activeSessionId,
+                message,
+                screenshotBase64,
+              },
+              {
+                signal: controller.signal,
+              },
+            );
+            updateLatestAssistantMessage(response.reply);
+          }
+          setStatusMessage(`WebSocket unavailable, switched to HTTP mode. ${wsError?.message || ''}`.trim());
+        }
+      } else if (useStreamingReplies) {
         let aggregateReply = '';
         response = await apiClient.sendLiveMessageStream(
           {
             sessionId: activeSessionId,
             message,
-            screenshotBase64: referenceImage ? referenceImage.split(',')[1] || undefined : undefined,
+            screenshotBase64,
           },
           {
             signal: controller.signal,
@@ -571,7 +626,7 @@ const App: React.FC = () => {
           {
             sessionId: activeSessionId,
             message,
-            screenshotBase64: referenceImage ? referenceImage.split(',')[1] || undefined : undefined,
+            screenshotBase64,
           },
           {
             signal: controller.signal,
@@ -634,6 +689,9 @@ const App: React.FC = () => {
 
   const handleInterruptIntake = () => {
     intakeAbortRef.current?.abort();
+    if (useWebSocketLive) {
+      liveWsRef.current?.interrupt();
+    }
     setIsSendingIntake(false);
     setIsAgentTyping(false);
     setStatusMessage('Intake interrupted. You can send a new message now.');
@@ -896,6 +954,8 @@ const App: React.FC = () => {
     if (liveRealtimeSessionId) {
       apiClient.stopRealtimeLiveSession(liveRealtimeSessionId).catch(() => undefined);
     }
+    liveWsRef.current?.close();
+    setIsWsConnected(false);
     setState(AppState.IDLE);
     setVideoSrc(null);
     setImageSrc(null);
@@ -1084,6 +1144,19 @@ const App: React.FC = () => {
                   className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800"
                 >
                   {useStreamingReplies ? 'Streaming: On' : 'Streaming: Off'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUseWebSocketLive((prev) => !prev);
+                    if (useWebSocketLive) {
+                      liveWsRef.current?.close();
+                      setIsWsConnected(false);
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800"
+                >
+                  {useWebSocketLive ? `Transport: WebSocket${isWsConnected ? ' (Connected)' : ''}` : 'Transport: HTTP'}
                 </button>
                 <button
                   type="button"
