@@ -311,6 +311,8 @@ const App: React.FC = () => {
   const intakeAbortRef = useRef<AbortController | null>(null);
   const intakeRecognitionRef = useRef<any>(null);
   const liveWsRef = useRef<LiveWsClient | null>(null);
+  const wsAudioBufferRef = useRef<{ streamId: string; mimeType: string; chunks: string[] } | null>(null);
+  const wsAudioElementRef = useRef<HTMLAudioElement | null>(null);
   const audioMediaRecorderRef = useRef<any>(null);
   const audioMediaStreamRef = useRef<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -351,6 +353,15 @@ const App: React.FC = () => {
           // ignore
         }
       }
+      if (wsAudioElementRef.current) {
+        try {
+          wsAudioElementRef.current.pause();
+        } catch {
+          // ignore
+        }
+      }
+      wsAudioElementRef.current = null;
+      wsAudioBufferRef.current = null;
       audioMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
       if (cameraIntervalRef.current) clearInterval(cameraIntervalRef.current);
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -364,6 +375,13 @@ const App: React.FC = () => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!speakAgentReplies) {
+      stopWsAudioPlayback();
+      wsAudioBufferRef.current = null;
+    }
+  }, [speakAgentReplies]);
 
   const handleSelectKey = async () => {
     if (hasConfiguredApiKey()) {
@@ -540,30 +558,69 @@ const App: React.FC = () => {
     setIntakeTranscript((prev) => [...prev, { role: 'assistant', content }]);
   };
 
+  function stopWsAudioPlayback() {
+    if (!wsAudioElementRef.current) return;
+    try {
+      wsAudioElementRef.current.pause();
+      wsAudioElementRef.current.src = '';
+    } catch {
+      // ignore
+    }
+    wsAudioElementRef.current = null;
+  }
+
   const ensureWsConnected = async (activeSessionId: string) => {
     if (!liveWsRef.current) {
       liveWsRef.current = new LiveWsClient(liveWsBase);
       liveWsRef.current.onEvent((event) => {
         if (event.type === 'transcript') {
           setIntakeTranscript((prev) => [...prev, { role: 'user', content: event.transcript }]);
+        } else if (event.type === 'audio_output_start') {
+          if (!speakAgentReplies) return;
+          wsAudioBufferRef.current = {
+            streamId: event.streamId,
+            mimeType: event.mimeType || 'audio/wav',
+            chunks: [],
+          };
+        } else if (event.type === 'audio_output_frame') {
+          if (!speakAgentReplies) return;
+          if (!wsAudioBufferRef.current || wsAudioBufferRef.current.streamId !== event.streamId) return;
+          wsAudioBufferRef.current.chunks.push(event.data);
+        } else if (event.type === 'audio_output_end') {
+          const buffered = wsAudioBufferRef.current;
+          wsAudioBufferRef.current = null;
+          if (!speakAgentReplies) return;
+          if (!buffered || buffered.streamId !== event.streamId || event.interrupted) return;
+          const combined = buffered.chunks.join('');
+          if (!combined) return;
+          try {
+            stopWsAudioPlayback();
+            const audio = new Audio(`data:${buffered.mimeType};base64,${combined}`);
+            wsAudioElementRef.current = audio;
+            void audio.play().catch(() => undefined);
+          } catch {
+            // ignore playback failures
+          }
+        } else if (event.type === 'session_started') {
+          const provider = event.mode ? `${event.mode}${event.model ? ` (${event.model})` : ''}` : 'default';
+          const fallback = event.fallbackReason ? ` | fallback: ${event.fallbackReason}` : '';
+          setStatusMessage(`Live session connected: ${provider}${fallback}`);
+        } else if (event.type === 'turn_started') {
+          setStatusMessage(`Live agent is processing ${event.source || 'input'}...`);
+        } else if (event.type === 'audio_ack') {
+          if (typeof event.bufferedChunks === 'number') {
+            setStatusMessage(`Voice chunk received (${event.bufferedChunks} buffered)`);
+          }
         } else if (event.type === 'final' && event.source === 'audio') {
           appendAssistantMessage(event.reply);
           setStatusMessage(event.reply);
           applyLiveIntentToUi(event.liveIntent);
-          if (speakAgentReplies && 'speechSynthesis' in window) {
-            try {
-              window.speechSynthesis.cancel();
-              const utterance = new SpeechSynthesisUtterance(event.reply);
-              utterance.rate = 1;
-              utterance.pitch = 1;
-              window.speechSynthesis.speak(utterance);
-            } catch {
-              // ignore
-            }
-          }
           if (sessionId) {
             refreshLoadedSession(sessionId).catch(() => undefined);
           }
+        } else if (event.type === 'interrupted') {
+          stopWsAudioPlayback();
+          wsAudioBufferRef.current = null;
         } else if (event.type === 'error') {
           setStatusMessage(event.error);
         }
@@ -700,7 +757,7 @@ const App: React.FC = () => {
           { role: 'assistant', content: `[Realtime] ${realtimeReply}` },
         ]);
       }
-      if (speakAgentReplies && 'speechSynthesis' in window) {
+      if (speakAgentReplies && 'speechSynthesis' in window && !useWebSocketLive) {
         try {
           window.speechSynthesis.cancel();
           const utterance = new SpeechSynthesisUtterance(response.reply);
@@ -750,6 +807,7 @@ const App: React.FC = () => {
     if (useWebSocketLive) {
       liveWsRef.current?.interrupt();
     }
+    stopWsAudioPlayback();
     if ('speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -1131,6 +1189,8 @@ const App: React.FC = () => {
     }
     handleStopAudioStream();
     handleStopCameraStream();
+    stopWsAudioPlayback();
+    wsAudioBufferRef.current = null;
     liveWsRef.current?.close();
     setIsWsConnected(false);
     setState(AppState.IDLE);
@@ -1371,6 +1431,8 @@ const App: React.FC = () => {
                     if (useWebSocketLive) {
                       handleStopAudioStream();
                       handleStopCameraStream();
+                      stopWsAudioPlayback();
+                      wsAudioBufferRef.current = null;
                       liveWsRef.current?.close();
                       setIsWsConnected(false);
                     }

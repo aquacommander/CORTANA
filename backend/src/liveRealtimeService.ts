@@ -9,6 +9,7 @@ type LiveSessionRecord = {
   liveConnection?: any;
   adkEndpoint?: string;
   fallbackReason?: string;
+  turnToken: number;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
 };
 
@@ -92,6 +93,7 @@ export async function startRealtimeSession(input: { sessionId: string; goal: str
     liveConnection,
     adkEndpoint: ADK_ENDPOINT || undefined,
     fallbackReason: fallbackReason || undefined,
+    turnToken: 0,
     history: [],
   });
   return {
@@ -120,6 +122,23 @@ export function hasRealtimeSession(liveSessionId: string): boolean {
   return liveSessions.has(liveSessionId);
 }
 
+export async function interruptRealtimeSession(liveSessionId: string): Promise<void> {
+  const record = liveSessions.get(liveSessionId);
+  if (!record) return;
+  record.turnToken += 1;
+  if (record.liveConnection) {
+    try {
+      if (typeof record.liveConnection.interrupt === 'function') {
+        await record.liveConnection.interrupt();
+      } else if (typeof record.liveConnection.cancel === 'function') {
+        await record.liveConnection.cancel();
+      }
+    } catch {
+      // best-effort interrupt
+    }
+  }
+}
+
 function buildRealtimePrompt(record: LiveSessionRecord, message: string): string {
   const historyText = record.history
     .slice(-8)
@@ -135,15 +154,38 @@ New user message: ${message}
 `;
 }
 
-async function trySendViaLiveConnection(connection: any, message: string): Promise<string | undefined> {
+async function trySendViaLiveConnection(
+  connection: any,
+  message: string,
+  screenshotBase64?: string,
+): Promise<string | undefined> {
   try {
+    const messageParts: any[] = [];
+    if (screenshotBase64) {
+      messageParts.push({
+        inlineData: {
+          data: screenshotBase64.replace(/^data:.*;base64,/, ''),
+          mimeType: 'image/jpeg',
+        },
+      });
+      messageParts.push({
+        text: 'Visual context is attached. Use it to answer accurately.',
+      });
+    }
+    messageParts.push({ text: message });
+
     if (typeof connection.send === 'function') {
-      const response = await connection.send({ text: message });
+      const response = await connection.send({ text: message, parts: messageParts });
+      const text = String(response?.text || response?.response?.text || '').trim();
+      if (text) return text;
+    }
+    if (typeof connection.sendMessage === 'function') {
+      const response = await connection.sendMessage({ parts: messageParts, text: message });
       const text = String(response?.text || response?.response?.text || '').trim();
       if (text) return text;
     }
     if (typeof connection.generate === 'function') {
-      const response = await connection.generate(message);
+      const response = await connection.generate({ text: message, parts: messageParts });
       const text = String(response?.text || '').trim();
       if (text) return text;
     }
@@ -174,27 +216,50 @@ async function sendViaAdkEndpoint(endpoint: string, message: string, goal: strin
 }
 
 export async function sendRealtimeMessage(liveSessionId: string, message: string): Promise<string> {
+  return sendRealtimeTurn(liveSessionId, { message });
+}
+
+function assertNotInterrupted(record: LiveSessionRecord, token: number) {
+  if (record.turnToken !== token) {
+    throw new Error('Interrupted');
+  }
+}
+
+function saveTurn(record: LiveSessionRecord, userMessage: string, assistantReply: string): string {
+  record.history.push({ role: 'user', content: userMessage });
+  record.history.push({ role: 'assistant', content: assistantReply });
+  return assistantReply;
+}
+
+export async function sendRealtimeTurn(
+  liveSessionId: string,
+  input: { message: string; screenshotBase64?: string },
+): Promise<string> {
   const record = liveSessions.get(liveSessionId);
   if (!record) {
     throw new Error(`Live session not found: ${liveSessionId}`);
   }
+  const localToken = record.turnToken + 1;
+  record.turnToken = localToken;
 
   // Try true live connection path first when available.
   if (record.liveConnection) {
-    const liveText = await trySendViaLiveConnection(record.liveConnection, message);
+    const liveText = await trySendViaLiveConnection(
+      record.liveConnection,
+      input.message,
+      input.screenshotBase64,
+    );
+    assertNotInterrupted(record, localToken);
     if (liveText) {
-      record.history.push({ role: 'user', content: message });
-      record.history.push({ role: 'assistant', content: liveText });
-      return liveText;
+      return saveTurn(record, input.message, liveText);
     }
   }
 
   if (record.provider === 'adk_compatible' && record.adkEndpoint) {
-    const adkText = await sendViaAdkEndpoint(record.adkEndpoint, message, record.goal);
+    const adkText = await sendViaAdkEndpoint(record.adkEndpoint, input.message, record.goal);
+    assertNotInterrupted(record, localToken);
     if (adkText) {
-      record.history.push({ role: 'user', content: message });
-      record.history.push({ role: 'assistant', content: adkText });
-      return adkText;
+      return saveTurn(record, input.message, adkText);
     }
     if (LIVE_STRICT) {
       throw new Error('LIVE_AGENT_STRICT=true and ADK endpoint did not return a realtime reply.');
@@ -203,10 +268,13 @@ export async function sendRealtimeMessage(liveSessionId: string, message: string
 
   const ai = await getAI();
   if (!ai) {
-    return `Realtime mode is available. I received: "${message}". Tell me your audience, tone, and platform so I can continue.`;
+    return `Realtime mode is available. I received: "${input.message}". Tell me your audience, tone, and platform so I can continue.`;
   }
 
-  const prompt = buildRealtimePrompt(record, message);
+  const visualHint = input.screenshotBase64
+    ? '\nVisual context attached by client. Consider what is visible in the frame.'
+    : '';
+  const prompt = `${buildRealtimePrompt(record, input.message)}${visualHint}`;
 
   try {
     // Prefer configured live model first.
@@ -215,10 +283,9 @@ export async function sendRealtimeMessage(liveSessionId: string, message: string
       contents: prompt,
     });
     const text = String(response.text || '').trim();
+    assertNotInterrupted(record, localToken);
     if (text) {
-      record.history.push({ role: 'user', content: message });
-      record.history.push({ role: 'assistant', content: text });
-      return text;
+      return saveTurn(record, input.message, text);
     }
   } catch {
     // fallback below
@@ -231,9 +298,8 @@ export async function sendRealtimeMessage(liveSessionId: string, message: string
   const finalText = String(
     fallback.text || 'I received your message. Please continue with your requirements.',
   ).trim();
-  record.history.push({ role: 'user', content: message });
-  record.history.push({ role: 'assistant', content: finalText });
-  return finalText;
+  assertNotInterrupted(record, localToken);
+  return saveTurn(record, input.message, finalText);
 }
 
 export function getRealtimeProviderMatrix() {
