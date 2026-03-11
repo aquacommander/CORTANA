@@ -14,6 +14,7 @@ import { analyzeNavigatorTarget } from './navigatorAnalyzer.ts';
 import { executeNavigatorPlan } from './navigatorExecutor.ts';
 import { getKnowledgeContext } from './knowledgeService.ts';
 import { processLiveMessage } from './liveAgentService.ts';
+import { attachLiveNativeGateway } from './liveNativeGateway.ts';
 import { attachLiveWsGateway } from './liveWsGateway.ts';
 import {
   getRealtimeProviderMatrix,
@@ -590,7 +591,8 @@ app.post('/api/orchestrator/run', async (req, res) => {
 async function startServer() {
   await store.initialize();
   const httpServer = createServer(app);
-  const wss = new WebSocketServer({ server: httpServer });
+  const wss = new WebSocketServer({ server: httpServer, path: '/api/live/ws' });
+  const nativeWss = new WebSocketServer({ server: httpServer, path: '/ws' });
   attachLiveWsGateway({
     wss,
     processMessage: processAndPersistLiveMessage,
@@ -603,6 +605,18 @@ async function startServer() {
     stopRealtime: stopRealtimeSession,
     getRealtimeMatrix: getRealtimeProviderMatrix,
   });
+  attachLiveNativeGateway({
+    wss: nativeWss,
+    geminiApiKey: process.env.GEMINI_API_KEY || '',
+    useVertex: process.env.GOOGLE_GENAI_USE_VERTEXAI === 'true',
+    vertexProject: process.env.GOOGLE_CLOUD_PROJECT || '',
+    vertexLocation: process.env.GOOGLE_CLOUD_LOCATION || 'us-central1',
+    geminiModel:
+      (process.env.GEMINI_LIVE_MODEL || '').trim() || 'gemini-live-2.5-flash-native-audio',
+    geminiSystemInstruction:
+      (process.env.GEMINI_SYSTEM_INSTRUCTION || '').trim() ||
+      'You are a concise and helpful real-time voice assistant. Keep answers brief and natural.',
+  });
 
   httpServer.listen(PORT, () => {
     const liveMode = (process.env.LIVE_AGENT_PROVIDER || '').trim() || 'gemini_live';
@@ -612,7 +626,7 @@ async function startServer() {
     console.log(
       `[${new Date().toISOString()}] [INFO] server.started ${JSON.stringify({
         port: PORT,
-        wsPath: '/api/live/ws',
+        wsPath: '/api/live/ws,/ws',
         liveMode,
         liveModel,
         vertexProject,
