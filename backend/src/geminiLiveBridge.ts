@@ -62,7 +62,7 @@ export class GeminiLiveBridge {
     const session = (await this.ai.live.connect({
       model: this.model,
       config: {
-        responseModalities: [Modality.AUDIO],
+        responseModalities: [Modality.AUDIO, Modality.TEXT],
         systemInstruction: this.systemInstruction,
       },
       callbacks: {
@@ -112,8 +112,17 @@ export class GeminiLiveBridge {
     if (!this.session) {
       return;
     }
+    const normalized = text.trim();
+    if (!normalized) {
+      return;
+    }
     this.session.sendClientContent({
-      turns: text,
+      turns: [
+        {
+          role: 'user',
+          parts: [{ text: normalized }],
+        },
+      ],
       turnComplete: true,
     });
   }

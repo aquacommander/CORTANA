@@ -133,6 +133,31 @@ type ConnectionState = {
   suppressNextCloseError: boolean;
 };
 
+function shouldFallbackModel(reason: string): boolean {
+  const normalized = reason.toLowerCase();
+  return (
+    normalized.includes('not found') ||
+    normalized.includes('not supported') ||
+    normalized.includes('unsupported') ||
+    normalized.includes('bidigeneratecontent')
+  );
+}
+
+function getFallbackModels(requestedModel: string, useVertex: boolean): string[] {
+  const configured = (process.env.LIVE_NATIVE_FALLBACK_MODELS || '')
+    .split(',')
+    .map((model) => model.trim())
+    .filter(Boolean);
+  if (configured.length > 0) {
+    return configured.filter((model) => model !== requestedModel);
+  }
+
+  const defaults = useVertex
+    ? ['gemini-live-2.5-flash-preview', 'gemini-2.0-flash-live-preview-04-09']
+    : ['gemini-live-2.5-flash-preview'];
+  return defaults.filter((model) => model !== requestedModel);
+}
+
 function sendJson(socket: WebSocket, message: ServerToClientMessage): void {
   socket.send(JSON.stringify(message));
 }
@@ -198,88 +223,142 @@ export function attachLiveNativeGateway(params: NativeGatewayParams): void {
         timestamp: new Date().toISOString(),
       });
     } else {
-      const geminiBridge = new GeminiLiveBridge({
-        apiKey: params.geminiApiKey,
-        useVertex: params.useVertex,
-        project: params.vertexProject,
-        location: params.vertexLocation,
-        model: params.geminiModel,
-        systemInstruction: params.geminiSystemInstruction,
-        callbacks: {
-          onReady: () => {
-            state.geminiReady = true;
-            log('INFO', 'gemini.native.session.ready', {
-              connectionId,
-              model: params.geminiModel,
-            });
-            sendJson(socket, {
-              type: 'gemini_session_ready',
-              model: params.geminiModel,
-              timestamp: new Date().toISOString(),
-            });
+      const fallbackModels = getFallbackModels(params.geminiModel, params.useVertex);
+      let activeModel = params.geminiModel;
+      let bridgeGeneration = 0;
+
+      const connectWithModel = (model: string): void => {
+        activeModel = model;
+        const currentGeneration = ++bridgeGeneration;
+        const geminiBridge = new GeminiLiveBridge({
+          apiKey: params.geminiApiKey,
+          useVertex: params.useVertex,
+          project: params.vertexProject,
+          location: params.vertexLocation,
+          model,
+          systemInstruction: params.geminiSystemInstruction,
+          callbacks: {
+            onReady: () => {
+              if (currentGeneration !== bridgeGeneration) return;
+              state.geminiReady = true;
+              log('INFO', 'gemini.native.session.ready', {
+                connectionId,
+                model,
+              });
+              sendJson(socket, {
+                type: 'gemini_session_ready',
+                model,
+                timestamp: new Date().toISOString(),
+              });
+            },
+            onAudioChunk: (audioPcm16) => {
+              if (currentGeneration !== bridgeGeneration) return;
+              sendFramedBinary(socket, SERVER_AUDIO_FRAME_TYPE, audioPcm16);
+            },
+            onText: (text) => {
+              if (currentGeneration !== bridgeGeneration) return;
+              sendJson(socket, {
+                type: 'gemini_text',
+                text,
+                timestamp: new Date().toISOString(),
+              });
+            },
+            onTurnComplete: () => {
+              if (currentGeneration !== bridgeGeneration) return;
+              state.suppressMicForwarding = false;
+              sendJson(socket, {
+                type: 'gemini_turn_complete',
+                timestamp: new Date().toISOString(),
+              });
+            },
+            onInterrupted: () => {
+              if (currentGeneration !== bridgeGeneration) return;
+              state.suppressMicForwarding = false;
+              sendJson(socket, {
+                type: 'model_interrupted',
+                timestamp: new Date().toISOString(),
+              });
+            },
+            onError: (message) => {
+              if (currentGeneration !== bridgeGeneration) return;
+              state.suppressMicForwarding = false;
+              log('ERROR', 'gemini.native.session.error', { connectionId, model, message });
+              sendJson(socket, {
+                type: 'gemini_error',
+                message,
+                timestamp: new Date().toISOString(),
+              });
+            },
+            onClose: (reason) => {
+              if (currentGeneration !== bridgeGeneration) return;
+              state.geminiReady = false;
+              state.suppressMicForwarding = false;
+              log('INFO', 'gemini.native.session.closed', { connectionId, model, reason });
+              if (state.suppressNextCloseError) {
+                state.suppressNextCloseError = false;
+                return;
+              }
+
+              if (shouldFallbackModel(reason) && fallbackModels.length > 0) {
+                const nextModel = fallbackModels.shift();
+                if (nextModel) {
+                  log('WARN', 'gemini.native.session.fallback', {
+                    connectionId,
+                    fromModel: model,
+                    toModel: nextModel,
+                    reason,
+                  });
+                  sendJson(socket, {
+                    type: 'gemini_error',
+                    message: `Model ${model} unavailable. Falling back to ${nextModel}.`,
+                    timestamp: new Date().toISOString(),
+                  });
+                  connectWithModel(nextModel);
+                  return;
+                }
+              }
+
+              sendJson(socket, {
+                type: 'gemini_error',
+                message: `Gemini session closed: ${reason}`,
+                timestamp: new Date().toISOString(),
+              });
+            },
           },
-          onAudioChunk: (audioPcm16) => {
-            sendFramedBinary(socket, SERVER_AUDIO_FRAME_TYPE, audioPcm16);
-          },
-          onText: (text) => {
-            sendJson(socket, {
-              type: 'gemini_text',
-              text,
-              timestamp: new Date().toISOString(),
-            });
-          },
-          onTurnComplete: () => {
-            state.suppressMicForwarding = false;
-            sendJson(socket, {
-              type: 'gemini_turn_complete',
-              timestamp: new Date().toISOString(),
-            });
-          },
-          onInterrupted: () => {
-            state.suppressMicForwarding = false;
-            sendJson(socket, {
-              type: 'model_interrupted',
-              timestamp: new Date().toISOString(),
-            });
-          },
-          onError: (message) => {
-            state.suppressMicForwarding = false;
-            log('ERROR', 'gemini.native.session.error', { connectionId, message });
-            sendJson(socket, {
-              type: 'gemini_error',
-              message,
-              timestamp: new Date().toISOString(),
-            });
-          },
-          onClose: (reason) => {
-            state.geminiReady = false;
-            state.suppressMicForwarding = false;
-            log('INFO', 'gemini.native.session.closed', { connectionId, reason });
-            if (state.suppressNextCloseError) {
-              state.suppressNextCloseError = false;
+        });
+
+        state.gemini?.close();
+        state.gemini = geminiBridge;
+        void geminiBridge.connect().catch((error: Error) => {
+          if (currentGeneration !== bridgeGeneration) return;
+          log('ERROR', 'gemini.native.session.connect_failed', {
+            connectionId,
+            model,
+            error: error.message,
+          });
+
+          if (fallbackModels.length > 0) {
+            const nextModel = fallbackModels.shift();
+            if (nextModel) {
+              sendJson(socket, {
+                type: 'gemini_error',
+                message: `Gemini model ${model} failed to connect. Falling back to ${nextModel}.`,
+                timestamp: new Date().toISOString(),
+              });
+              connectWithModel(nextModel);
               return;
             }
-            sendJson(socket, {
-              type: 'gemini_error',
-              message: `Gemini session closed: ${reason}`,
-              timestamp: new Date().toISOString(),
-            });
-          },
-        },
-      });
+          }
 
-      state.gemini = geminiBridge;
-      void geminiBridge.connect().catch((error: Error) => {
-        log('ERROR', 'gemini.native.session.connect_failed', {
-          connectionId,
-          error: error.message,
+          sendJson(socket, {
+            type: 'gemini_error',
+            message: `Gemini connection failed: ${error.message}`,
+            timestamp: new Date().toISOString(),
+          });
         });
-        sendJson(socket, {
-          type: 'gemini_error',
-          message: `Gemini connection failed: ${error.message}`,
-          timestamp: new Date().toISOString(),
-        });
-      });
+      };
+
+      connectWithModel(activeModel);
     }
 
     socket.on('message', async (data: RawData, isBinary) => {
