@@ -13,7 +13,7 @@ import { getRandomStyle, fileToBase64, TYPOGRAPHY_SUGGESTIONS, createGifFromVide
 import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck } from 'lucide-react';
 import { LiveIntent, Session, WorkflowStage } from './shared/contracts';
 import { WORKFLOW_STAGES } from './shared/workflow';
-import { NativeLiveAgentPanel } from './components/liveNative/NativeLiveAgentPanel';
+import { StreamingPcmPlayer } from './components/liveNative/player';
 
 interface Video {
   id: string;
@@ -24,6 +24,7 @@ interface Video {
 
 const staticFilesUrl = 'https://www.gstatic.com/aistudio/starter-apps/type-motion/';
 const liveWsBase = (import.meta as any).env?.VITE_LIVE_WS_BASE || 'ws://localhost:8787';
+const nativeLiveWsUrl = (import.meta as any).env?.VITE_NATIVE_LIVE_WS_URL || 'ws://localhost:8787/ws';
 
 type AiStudioBridge = {
   hasSelectedApiKey?: () => Promise<boolean>;
@@ -286,6 +287,9 @@ const App: React.FC = () => {
   const [wsClientId, setWsClientId] = useState<string>('');
   const [wsConnectionId, setWsConnectionId] = useState<string>('');
   const [wsActiveModel, setWsActiveModel] = useState<string>('');
+  const [isNativeConnected, setIsNativeConnected] = useState<boolean>(false);
+  const [nativeActiveModel, setNativeActiveModel] = useState<string>('');
+  const [nativeMicAckBytes, setNativeMicAckBytes] = useState<number>(0);
   const [micChunksSent, setMicChunksSent] = useState<number>(0);
   const [audioBytesReceived, setAudioBytesReceived] = useState<number>(0);
   const [lastBackendAudioAckBytes, setLastBackendAudioAckBytes] = useState<number>(0);
@@ -318,6 +322,8 @@ const App: React.FC = () => {
   const intakeAbortRef = useRef<AbortController | null>(null);
   const intakeRecognitionRef = useRef<any>(null);
   const liveWsRef = useRef<LiveWsClient | null>(null);
+  const nativeWsRef = useRef<WebSocket | null>(null);
+  const nativePlayerRef = useRef<StreamingPcmPlayer | null>(null);
   const wsAudioBufferRef = useRef<{ streamId: string; mimeType: string; chunks: string[] } | null>(null);
   const wsAudioElementRef = useRef<HTMLAudioElement | null>(null);
   const wsVoiceFallbackTimerRef = useRef<number | null>(null);
@@ -347,7 +353,7 @@ const App: React.FC = () => {
   });
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
-  const cameraIntervalRef = useRef<any>(null);
+  const cameraCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     if (state === AppState.GENERATING_IMAGE || state === AppState.GENERATING_VIDEO || state === AppState.PLAYING) {
@@ -396,9 +402,10 @@ const App: React.FC = () => {
       clearWsVoiceFallbackTimer();
       stopVoiceActivityDetection();
       audioMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-      if (cameraIntervalRef.current) clearInterval(cameraIntervalRef.current);
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
       liveWsRef.current?.close();
+      nativeWsRef.current?.close();
+      void nativePlayerRef.current?.destroy();
       if (intakeRecognitionRef.current) {
         try {
           intakeRecognitionRef.current.stop();
@@ -414,6 +421,7 @@ const App: React.FC = () => {
       stopWsAudioPlayback();
       wsAudioBufferRef.current = null;
       clearWsVoiceFallbackTimer();
+      disconnectNativeLive();
     }
   }, [speakAgentReplies]);
 
@@ -918,6 +926,125 @@ const App: React.FC = () => {
     }
   };
 
+  const sendNativeJson = (message: Record<string, unknown>) => {
+    if (!nativeWsRef.current || nativeWsRef.current.readyState !== WebSocket.OPEN) return;
+    nativeWsRef.current.send(JSON.stringify(message));
+  };
+
+  const connectNativeLive = async () => {
+    if (!speakAgentReplies) {
+      setStatusMessage('Turn Agent Voice on before connecting native live agent.');
+      return;
+    }
+    if (nativeWsRef.current && nativeWsRef.current.readyState === WebSocket.OPEN) {
+      return;
+    }
+    const socket = new WebSocket(nativeLiveWsUrl);
+    socket.binaryType = 'arraybuffer';
+    nativeWsRef.current = socket;
+
+    socket.onopen = () => {
+      nativePlayerRef.current = nativePlayerRef.current ?? new StreamingPcmPlayer();
+      sendNativeJson({
+        type: 'client_hello',
+        clientId: crypto.randomUUID ? crypto.randomUUID() : `client-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+      });
+      setIsNativeConnected(true);
+      setStatusMessage('Native live agent connected.');
+    };
+
+    socket.onmessage = (event: MessageEvent<ArrayBuffer | string>) => {
+      if (typeof event.data === 'string') {
+        let parsed: any;
+        try {
+          parsed = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (parsed?.type === 'gemini_session_ready') {
+          setNativeActiveModel(parsed.model || '');
+          setIsNativeConnected(true);
+        } else if (parsed?.type === 'binary_stub_received') {
+          setNativeMicAckBytes(parsed.byteLength || 0);
+        } else if (parsed?.type === 'gemini_error') {
+          setStatusMessage(parsed.message || 'Native live error');
+        } else if (parsed?.type === 'snapshot_received') {
+          setStatusMessage(`Snapshot sent (${parsed.imageBytes || 0} bytes).`);
+        }
+        return;
+      }
+
+      const bytes = new Uint8Array(event.data);
+      if (bytes.length < 2) return;
+      const frameType = bytes[0];
+      if (frameType !== 0x02) return;
+      const payload = bytes.subarray(1);
+      if (payload.byteLength % 2 !== 0) return;
+      const aligned = new Uint8Array(payload.byteLength);
+      aligned.set(payload);
+      const pcm = new Int16Array(aligned.buffer);
+      nativePlayerRef.current?.enqueuePcm16(pcm);
+      void nativePlayerRef.current?.start();
+    };
+
+    socket.onclose = () => {
+      setIsNativeConnected(false);
+      setNativeActiveModel('');
+      nativeWsRef.current = null;
+    };
+
+    socket.onerror = () => {
+      setStatusMessage('Native live socket error.');
+    };
+  };
+
+  const disconnectNativeLive = () => {
+    nativeWsRef.current?.close(1000, 'Manual disconnect');
+    nativeWsRef.current = null;
+    setIsNativeConnected(false);
+    setNativeActiveModel('');
+    setNativeMicAckBytes(0);
+    nativePlayerRef.current?.stopAndFlush();
+  };
+
+  const sendNativeTextPrompt = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || !nativeWsRef.current || nativeWsRef.current.readyState !== WebSocket.OPEN) return;
+    sendNativeJson({
+      type: 'send_text_prompt',
+      requestId: crypto.randomUUID ? crypto.randomUUID() : `req-${Date.now()}`,
+      text: trimmed,
+      timestamp: new Date().toISOString(),
+    });
+  };
+
+  const sendNativeSnapshot = () => {
+    if (!cameraVideoRef.current || !cameraCanvasRef.current || !isNativeConnected) {
+      setStatusMessage('Start camera and connect native live first.');
+      return;
+    }
+    const video = cameraVideoRef.current;
+    const canvas = cameraCanvasRef.current;
+    const width = video.videoWidth || 640;
+    const height = video.videoHeight || 360;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+    const imageBase64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
+    sendNativeJson({
+      type: 'send_snapshot_prompt',
+      requestId: crypto.randomUUID ? crypto.randomUUID() : `req-${Date.now()}`,
+      question: intakeMessage.trim() || 'What do you see in this image?',
+      mimeType: 'image/jpeg',
+      imageBase64,
+      timestamp: new Date().toISOString(),
+    });
+  };
+
   const handleSendIntakeMessage = async () => {
     const message = intakeMessage.trim();
     if (!message) return;
@@ -1036,6 +1163,9 @@ const App: React.FC = () => {
       }
 
       setStatusMessage(response.reply);
+      if (speakAgentReplies && isNativeConnected) {
+        sendNativeTextPrompt(message);
+      }
       if (realtimeReply) {
         setIntakeTranscript((prev) => [
           ...prev,
@@ -1183,38 +1313,15 @@ const App: React.FC = () => {
 
   const handleStartCameraStream = async () => {
     try {
-      let activeSessionId = sessionId;
-      if (!activeSessionId) {
-        const { session } = await apiClient.createSession(intakeMessage.trim() || 'Live camera intake');
-        activeSessionId = session.sessionId;
-        setSessionId(activeSessionId);
-        setSessionLookupId(activeSessionId);
-      }
-      await ensureWsConnected(activeSessionId);
+      if (cameraStreamRef.current) return;
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       cameraStreamRef.current = stream;
-      const video = document.createElement('video');
-      video.srcObject = stream;
-      video.muted = true;
-      video.playsInline = true;
-      await video.play();
-      cameraVideoRef.current = video;
-
-      const canvas = document.createElement('canvas');
-      cameraIntervalRef.current = window.setInterval(() => {
-        if (!cameraVideoRef.current || !liveWsRef.current) return;
-        const width = cameraVideoRef.current.videoWidth || 640;
-        const height = cameraVideoRef.current.videoHeight || 360;
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-        ctx.drawImage(cameraVideoRef.current, 0, 0, width, height);
-        const frameBase64 = canvas.toDataURL('image/jpeg', 0.6).replace(/^data:image\/jpeg;base64,/, '');
-        liveWsRef.current.sendVisionFrame(frameBase64);
-      }, 1200);
+      if (cameraVideoRef.current) {
+        cameraVideoRef.current.srcObject = stream;
+        await cameraVideoRef.current.play();
+      }
       setIsCameraStreaming(true);
-      setStatusMessage('Camera stream started. The live agent now receives visual context.');
+      setStatusMessage('Camera stream started.');
     } catch (error: any) {
       setStatusMessage(error?.message || 'Unable to start camera stream');
       setIsCameraStreaming(false);
@@ -1222,15 +1329,13 @@ const App: React.FC = () => {
   };
 
   const handleStopCameraStream = () => {
-    if (cameraIntervalRef.current) {
-      clearInterval(cameraIntervalRef.current);
-      cameraIntervalRef.current = null;
-    }
     if (cameraStreamRef.current) {
       cameraStreamRef.current.getTracks().forEach((track) => track.stop());
       cameraStreamRef.current = null;
     }
-    cameraVideoRef.current = null;
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.srcObject = null;
+    }
     setIsCameraStreaming(false);
   };
 
@@ -1705,7 +1810,7 @@ const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleStartCameraStream}
-                  disabled={isCameraStreaming || !useWebSocketLive}
+                  disabled={isCameraStreaming}
                   className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
                 >
                   {isCameraStreaming ? 'Camera: On' : 'Start Camera Stream'}
@@ -1717,6 +1822,30 @@ const App: React.FC = () => {
                   className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
                 >
                   Stop Camera Stream
+                </button>
+                <button
+                  type="button"
+                  onClick={sendNativeSnapshot}
+                  disabled={!isCameraStreaming || !isNativeConnected}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Send Snapshot
+                </button>
+                <button
+                  type="button"
+                  onClick={connectNativeLive}
+                  disabled={!speakAgentReplies || isNativeConnected}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Connect
+                </button>
+                <button
+                  type="button"
+                  onClick={disconnectNativeLive}
+                  disabled={!isNativeConnected}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Disconnect
                 </button>
                 <button
                   type="button"
@@ -1812,6 +1941,13 @@ const App: React.FC = () => {
                 <p className="text-xs text-stone-500 dark:text-zinc-400">
                   Last backend audio ack: {lastBackendAudioAckBytes} bytes
                 </p>
+                <p className="text-xs text-stone-500 dark:text-zinc-400">
+                  Native live: {isNativeConnected ? 'Connected' : 'Disconnected'}
+                  {nativeActiveModel ? ` (${nativeActiveModel})` : ''}
+                </p>
+                <p className="text-xs text-stone-500 dark:text-zinc-400">
+                  Native mic uplink ack: {nativeMicAckBytes} bytes
+                </p>
                 {loadedSession?.liveIntent?.missingFields && loadedSession.liveIntent.missingFields.length > 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
                     Missing fields: {loadedSession.liveIntent.missingFields.join(', ')}
@@ -1838,8 +1974,22 @@ const App: React.FC = () => {
                   </p>
                 )}
               </div>
+              {isCameraStreaming && (
+                <div className="mt-2 rounded-lg border border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-2">
+                  <p className="text-[11px] font-semibold text-stone-500 dark:text-zinc-400 uppercase tracking-wide mb-2">
+                    Camera Preview
+                  </p>
+                  <video
+                    ref={cameraVideoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className="w-full max-w-md rounded-lg border border-stone-200 dark:border-zinc-800"
+                  />
+                  <canvas ref={cameraCanvasRef} className="hidden" />
+                </div>
+              )}
             </div>
-            <NativeLiveAgentPanel />
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <input
                 type="text"
