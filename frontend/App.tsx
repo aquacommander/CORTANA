@@ -328,6 +328,7 @@ const App: React.FC = () => {
   const nativeWsRef = useRef<WebSocket | null>(null);
   const nativePlayerRef = useRef<StreamingPcmPlayer | null>(null);
   const nativeSpeakingTimeoutRef = useRef<number | null>(null);
+  const nativeHealthStateRef = useRef<'disconnected' | 'connecting' | 'ready' | 'thinking' | 'speaking' | 'interrupted' | 'failed'>('disconnected');
   const wsAudioBufferRef = useRef<{ streamId: string; mimeType: string; chunks: string[] } | null>(null);
   const wsAudioElementRef = useRef<HTMLAudioElement | null>(null);
   const wsVoiceFallbackTimerRef = useRef<number | null>(null);
@@ -423,6 +424,10 @@ const App: React.FC = () => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    nativeHealthStateRef.current = nativeHealthState;
+  }, [nativeHealthState]);
 
   useEffect(() => {
     if (!speakAgentReplies) {
@@ -976,6 +981,8 @@ const App: React.FC = () => {
           setNativeActiveModel(parsed.model || '');
           setIsNativeConnected(true);
           setNativeHealthState('ready');
+        } else if (parsed?.type === 'gemini_turn_complete') {
+          setNativeHealthState('ready');
         } else if (parsed?.type === 'binary_stub_received') {
           setNativeMicAckBytes(parsed.byteLength || 0);
         } else if (parsed?.type === 'gemini_error') {
@@ -1198,6 +1205,17 @@ const App: React.FC = () => {
       setStatusMessage(response.reply);
       if (speakAgentReplies && isNativeConnected) {
         sendNativeTextPrompt(message);
+        window.setTimeout(() => {
+          if (!speakAgentReplies) return;
+          const state = nativeHealthStateRef.current;
+          if (state !== 'speaking' && state !== 'thinking') {
+            speakWithBrowserTts(response.reply);
+          }
+        }, 1200);
+      }
+      if (speakAgentReplies && !isNativeConnected) {
+        speakWithBrowserTts(response.reply);
+        setStatusMessage('Native voice is disconnected. Played browser TTS fallback.');
       }
       if (realtimeReply) {
         setIntakeTranscript((prev) => [
