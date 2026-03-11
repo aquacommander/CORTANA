@@ -26,6 +26,10 @@ type SendRealtimeFn = (
 ) => Promise<string>;
 type InterruptRealtimeFn = (liveSessionId: string) => Promise<void>;
 type StopRealtimeFn = (liveSessionId: string) => Promise<void>;
+type RealtimeMatrixFn = () => {
+  activeProvider: string;
+  liveModel: string;
+};
 
 type ClientState = {
   connectionId: string;
@@ -136,6 +140,7 @@ export function attachLiveWsGateway(params: {
   sendRealtime: SendRealtimeFn;
   interruptRealtime: InterruptRealtimeFn;
   stopRealtime: StopRealtimeFn;
+  getRealtimeMatrix: RealtimeMatrixFn;
 }) {
   params.wss.on('connection', (socket: WebSocket, req: IncomingMessage) => {
     const url = req.url || '';
@@ -258,7 +263,10 @@ export function attachLiveWsGateway(params: {
         }
         try {
           const goal = params.resolveGoal(sessionId);
-          let liveMeta: { mode?: string; model?: string; fallbackReason?: string } = {};
+          let liveMeta: { mode?: string; model?: string; fallbackReason?: string } = {
+            mode: params.getRealtimeMatrix().activeProvider,
+            model: params.getRealtimeMatrix().liveModel,
+          };
           if (state.liveSessionId && state.sessionId && state.sessionId !== sessionId) {
             await params.stopRealtime(state.liveSessionId).catch(() => undefined);
             state.liveSessionId = undefined;

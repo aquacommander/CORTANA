@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
@@ -600,6 +601,7 @@ async function startServer() {
     sendRealtime: sendRealtimeTurn,
     interruptRealtime: interruptRealtimeSession,
     stopRealtime: stopRealtimeSession,
+    getRealtimeMatrix: getRealtimeProviderMatrix,
   });
 
   httpServer.listen(PORT, () => {

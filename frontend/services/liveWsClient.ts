@@ -55,7 +55,6 @@ export class LiveWsClient {
 
   async connect(sessionId: string): Promise<void> {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      if (this.currentSessionId === sessionId) return;
       await new Promise<void>((resolve, reject) => {
         this.sessionStartWaiter = { resolve, reject };
         this.socket!.send(JSON.stringify({ type: 'start_session', sessionId }));
