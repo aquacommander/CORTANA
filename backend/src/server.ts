@@ -591,8 +591,8 @@ app.post('/api/orchestrator/run', async (req, res) => {
 async function startServer() {
   await store.initialize();
   const httpServer = createServer(app);
-  const wss = new WebSocketServer({ server: httpServer, path: '/api/live/ws' });
-  const nativeWss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  const wss = new WebSocketServer({ noServer: true });
+  const nativeWss = new WebSocketServer({ noServer: true });
   attachLiveWsGateway({
     wss,
     processMessage: processAndPersistLiveMessage,
@@ -616,6 +616,27 @@ async function startServer() {
     geminiSystemInstruction:
       (process.env.GEMINI_SYSTEM_INSTRUCTION || '').trim() ||
       'You are a concise and helpful real-time voice assistant. Keep answers brief and natural.',
+  });
+
+  httpServer.on('upgrade', (req, socket, head) => {
+    const host = req.headers.host || 'localhost';
+    const pathname = new URL(req.url || '/', `http://${host}`).pathname;
+
+    if (pathname === '/api/live/ws') {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+      return;
+    }
+
+    if (pathname === '/ws') {
+      nativeWss.handleUpgrade(req, socket, head, (ws) => {
+        nativeWss.emit('connection', ws, req);
+      });
+      return;
+    }
+
+    socket.destroy();
   });
 
   httpServer.listen(PORT, () => {
