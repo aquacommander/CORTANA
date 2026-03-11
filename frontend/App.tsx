@@ -821,7 +821,7 @@ const App: React.FC = () => {
         if (speakingDurationMs >= minSpeakingMs) {
           state.hasSpeechInTurn = true;
         }
-        if (speakingDurationMs >= interruptSpeechMs && !state.bargeInTriggered) {
+        if (agentSpeaking && speakingDurationMs >= interruptSpeechMs && !state.bargeInTriggered) {
           state.bargeInTriggered = true;
           stopWsAudioPlayback();
           if ('speechSynthesis' in window) {
