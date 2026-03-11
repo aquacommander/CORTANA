@@ -336,11 +336,13 @@ const App: React.FC = () => {
     hasSpeechInTurn: boolean;
     lastVoiceAtMs: number;
     autoCommitLock: boolean;
+    bargeInTriggered: boolean;
   }>({
     isUserSpeaking: false,
     hasSpeechInTurn: false,
     lastVoiceAtMs: 0,
     autoCommitLock: false,
+    bargeInTriggered: false,
   });
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -741,6 +743,7 @@ const App: React.FC = () => {
       hasSpeechInTurn: false,
       lastVoiceAtMs: 0,
       autoCommitLock: false,
+      bargeInTriggered: false,
     };
   };
 
@@ -759,6 +762,8 @@ const App: React.FC = () => {
     voiceDataRef.current = new Uint8Array(analyser.fftSize);
 
     const voiceThreshold = 0.018;
+    const voiceThresholdWhileAgentSpeaking = 0.03;
+    const interruptSpeechMs = 320;
     const silenceMsToCommit = 1200;
     const minSpeakingMs = 200;
     let speakingSinceMs = 0;
@@ -776,12 +781,26 @@ const App: React.FC = () => {
       const rms = Math.sqrt(sum / currentData.length);
       const now = Date.now();
       const state = liveVoiceStateRef.current;
-      const speakingNow = rms > voiceThreshold;
+      const agentSpeaking =
+        Boolean(wsAudioElementRef.current) &&
+        !wsAudioElementRef.current!.paused &&
+        !wsAudioElementRef.current!.ended;
+      const effectiveThreshold = agentSpeaking ? voiceThresholdWhileAgentSpeaking : voiceThreshold;
+      const speakingNow = rms > effectiveThreshold;
 
       if (speakingNow) {
         if (!state.isUserSpeaking) {
           state.isUserSpeaking = true;
+          state.bargeInTriggered = false;
           speakingSinceMs = now;
+        }
+        state.lastVoiceAtMs = now;
+        const speakingDurationMs = now - speakingSinceMs;
+        if (speakingDurationMs >= minSpeakingMs) {
+          state.hasSpeechInTurn = true;
+        }
+        if (speakingDurationMs >= interruptSpeechMs && !state.bargeInTriggered) {
+          state.bargeInTriggered = true;
           stopWsAudioPlayback();
           if ('speechSynthesis' in window) {
             try {
@@ -793,12 +812,9 @@ const App: React.FC = () => {
           liveWsRef.current?.interrupt();
           setStatusMessage('Listening...');
         }
-        state.lastVoiceAtMs = now;
-        if (now - speakingSinceMs >= minSpeakingMs) {
-          state.hasSpeechInTurn = true;
-        }
       } else if (state.isUserSpeaking && now - state.lastVoiceAtMs >= silenceMsToCommit) {
         state.isUserSpeaking = false;
+        state.bargeInTriggered = false;
         if (state.hasSpeechInTurn && !state.autoCommitLock) {
           state.autoCommitLock = true;
           liveWsRef.current?.commitAudio();
@@ -822,6 +838,7 @@ const App: React.FC = () => {
         } else if (event.type === 'transcript') {
           liveVoiceStateRef.current.hasSpeechInTurn = false;
           liveVoiceStateRef.current.autoCommitLock = false;
+          liveVoiceStateRef.current.bargeInTriggered = false;
           setIntakeTranscript((prev) => [...prev, { role: 'user', content: event.transcript }]);
         } else if (event.type === 'audio_output_start') {
           if (!speakAgentReplies) return;
@@ -869,6 +886,7 @@ const App: React.FC = () => {
         } else if (event.type === 'final') {
           if (event.source === 'audio') {
             liveVoiceStateRef.current.autoCommitLock = false;
+            liveVoiceStateRef.current.bargeInTriggered = false;
             appendAssistantMessage(event.reply);
             setStatusMessage(event.reply);
             applyLiveIntentToUi(event.liveIntent);
@@ -880,11 +898,13 @@ const App: React.FC = () => {
           }
         } else if (event.type === 'interrupted') {
           liveVoiceStateRef.current.autoCommitLock = false;
+          liveVoiceStateRef.current.bargeInTriggered = false;
           stopWsAudioPlayback();
           wsAudioBufferRef.current = null;
           clearWsVoiceFallbackTimer();
         } else if (event.type === 'error') {
           liveVoiceStateRef.current.autoCommitLock = false;
+          liveVoiceStateRef.current.bargeInTriggered = false;
           clearWsVoiceFallbackTimer();
           setStatusMessage(event.error);
         }
@@ -1087,7 +1107,13 @@ const App: React.FC = () => {
         setSessionLookupId(activeSessionId);
       }
       await ensureWsConnected(activeSessionId);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       audioMediaStreamRef.current = stream;
       const usingPcmPath = await startPcmStreaming(stream);
       if (!usingPcmPath) {
