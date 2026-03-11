@@ -24,6 +24,7 @@ import {
   stopRealtimeSession,
 } from './liveRealtimeService.ts';
 import { SessionStore } from './sessionStore.ts';
+import { runOrchestratedWorkflow } from './orchestratorService.ts';
 import { buildStoryOutput, regenerateStoryBlock } from './storytellerService.ts';
 import {
   createSessionSchema,
@@ -34,6 +35,7 @@ import {
   liveRealtimeStartSchema,
   navigatorAnalyzeSchema,
   navigatorExecuteSchema,
+  orchestratorRunSchema,
   regenerateStoryBlockSchema,
 } from './validators.ts';
 
@@ -550,6 +552,37 @@ app.post('/api/navigator/execute', async (req, res) => {
     return res.json({ executionResult });
   } catch (error: any) {
     return res.status(400).json({ error: error.message || 'Unable to execute navigator plan' });
+  }
+});
+
+app.post('/api/orchestrator/run', async (req, res) => {
+  try {
+    const parsed = orchestratorRunSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: getZodErrorMessage(parsed.error) });
+    }
+    const session = getSessionOrThrow(parsed.data.sessionId);
+    if (parsed.data.targetUrl) {
+      assertTargetUrlAllowed(parsed.data.targetUrl);
+    }
+    const result = await runOrchestratedWorkflow(session, parsed.data, {
+      getKnowledgeContext,
+      appendLog,
+      moveStage,
+      ensureStage,
+      saveSession: async (updatedSession) => {
+        await store.set(updatedSession);
+      },
+    });
+    return res.json({
+      storyOutput: result.storyOutput,
+      navigatorPlan: result.navigatorPlan,
+      executionResult: result.executionResult,
+      completionReply: result.completionReply,
+      session,
+    });
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Unable to run orchestrated workflow' });
   }
 });
 

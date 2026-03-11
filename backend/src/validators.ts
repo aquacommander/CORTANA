@@ -57,6 +57,22 @@ export const navigatorExecuteSchema = z.object({
   headless: z.boolean().optional(),
 });
 
+export const orchestratorRunSchema = z.object({
+  sessionId: requiredString('sessionId', 120),
+  text: z.string().trim().max(2000, 'text is too long').optional(),
+  style: z.string().trim().max(2000, 'style is too long').optional(),
+  typographyPrompt: z.string().trim().max(2000, 'typographyPrompt is too long').optional(),
+  referenceImage: z.string().trim().max(30000000, 'referenceImage is too long').optional(),
+  imageUrl: z.string().trim().url('imageUrl must be a valid URL').optional(),
+  videoUrl: z.string().trim().url('videoUrl must be a valid URL').optional(),
+  generateAssets: z.boolean().optional(),
+  screenshotBase64: z.string().trim().max(20000000, 'screenshotBase64 is too long').optional(),
+  screenRecordingBase64: z.string().trim().max(60000000, 'screenRecordingBase64 is too long').optional(),
+  targetUrl: z.string().trim().url('targetUrl must be a valid URL').optional(),
+  mode: z.enum(['mock', 'playwright']).optional(),
+  headless: z.boolean().optional(),
+});
+
 export function getZodErrorMessage(error: z.ZodError): string {
   const issue = error.issues[0];
   if (!issue) return 'Invalid request payload';

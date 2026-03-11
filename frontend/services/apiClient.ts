@@ -239,4 +239,30 @@ export const apiClient = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  runOrchestrator: (payload: {
+    sessionId: string;
+    text?: string;
+    style?: string;
+    typographyPrompt?: string;
+    referenceImage?: string;
+    imageUrl?: string;
+    videoUrl?: string;
+    generateAssets?: boolean;
+    screenshotBase64?: string;
+    screenRecordingBase64?: string;
+    targetUrl?: string;
+    mode?: 'mock' | 'playwright';
+    headless?: boolean;
+  }) =>
+    request<{
+      storyOutput: StoryOutput;
+      navigatorPlan: NavigatorPlan;
+      executionResult: ExecutionResult;
+      completionReply: string;
+      session: Session;
+    }>('/orchestrator/run', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };

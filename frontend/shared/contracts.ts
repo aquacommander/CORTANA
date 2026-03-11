@@ -81,6 +81,7 @@ export interface Session {
   storyOutput?: StoryOutput;
   navigatorPlan?: NavigatorPlan;
   executionResult?: ExecutionResult;
+  completionFeedback?: string;
   logs: string[];
   createdAt: string;
   updatedAt: string;
