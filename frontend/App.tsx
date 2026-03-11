@@ -1413,7 +1413,7 @@ const App: React.FC = () => {
 
       if (activeSessionId) {
         try {
-          await apiClient.generateStory({
+          const orchestrated = await apiClient.runOrchestrator({
             sessionId: activeSessionId,
             text: inputText,
             style: styleToUse,
@@ -1422,24 +1422,26 @@ const App: React.FC = () => {
             imageUrl: resolvedImageUrl,
             videoUrl: resolvedVideoUrl,
             generateAssets: false,
-          });
-          setWorkflowStageOverride('STORY_REVIEW');
-          await apiClient.analyzeNavigator({
-            sessionId: activeSessionId,
             screenshotBase64,
             screenRecordingBase64: screenRecording ? screenRecording.split(',')[1] || undefined : undefined,
             targetUrl: navigatorTargetUrl.trim() || undefined,
-          });
-          setWorkflowStageOverride('NAVIGATOR_ANALYSIS');
-          const { executionResult } = await apiClient.executeNavigator({
-            sessionId: activeSessionId,
             mode: navigatorMode,
-            targetUrl: navigatorTargetUrl.trim() || undefined,
             headless: true,
           });
           setWorkflowStageOverride('COMPLETION');
-          if (executionResult.status !== 'success') {
-            setStatusMessage(`Execution finished with status: ${executionResult.status}`);
+          setLoadedSession(orchestrated.session);
+          setStatusMessage(orchestrated.completionReply || 'Workflow completed.');
+          setIntakeTranscript((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: orchestrated.completionReply,
+            },
+          ]);
+          if (orchestrated.executionResult.status !== 'success') {
+            setStatusMessage(
+              `${orchestrated.completionReply} (Execution status: ${orchestrated.executionResult.status})`,
+            );
           }
           const session = await refreshLoadedSession(activeSessionId);
           setSessionLookupId(session.sessionId);
@@ -1801,6 +1803,11 @@ const App: React.FC = () => {
                 {loadedSession?.liveIntent?.interests && loadedSession.liveIntent.interests.length > 0 && (
                   <p className="text-xs text-stone-500 dark:text-zinc-400">
                     Interests: {loadedSession.liveIntent.interests.join(', ')}
+                  </p>
+                )}
+                {loadedSession?.completionFeedback && (
+                  <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                    Completion feedback: {loadedSession.completionFeedback}
                   </p>
                 )}
               </div>
