@@ -15,11 +15,22 @@ type LiveSessionRecord = {
 
 const liveSessions = new Map<string, LiveSessionRecord>();
 
-const REALTIME_PROVIDER = ((process.env.LIVE_AGENT_PROVIDER || '').trim().toLowerCase() ||
-  'gemini_live') as 'gemini_live' | 'adk_compatible' | 'genai_fallback';
-const LIVE_MODEL = (process.env.GEMINI_LIVE_MODEL || '').trim() || 'gemini-live-2.5-flash-preview';
-const ADK_ENDPOINT = (process.env.ADK_ENDPOINT || '').trim();
-const LIVE_STRICT = (process.env.LIVE_AGENT_STRICT || '').trim().toLowerCase() === 'true';
+function getRealtimeProvider(): 'gemini_live' | 'adk_compatible' | 'genai_fallback' {
+  return ((process.env.LIVE_AGENT_PROVIDER || '').trim().toLowerCase() ||
+    'gemini_live') as 'gemini_live' | 'adk_compatible' | 'genai_fallback';
+}
+
+function getLiveModel(): string {
+  return (process.env.GEMINI_LIVE_MODEL || '').trim() || 'gemini-live-2.5-flash-preview';
+}
+
+function getAdkEndpoint(): string {
+  return (process.env.ADK_ENDPOINT || '').trim();
+}
+
+function isLiveStrictMode(): boolean {
+  return (process.env.LIVE_AGENT_STRICT || '').trim().toLowerCase() === 'true';
+}
 
 async function getAI(): Promise<any | null> {
   const key = (process.env.GEMINI_API_KEY || '').trim();
@@ -29,13 +40,14 @@ async function getAI(): Promise<any | null> {
 }
 
 async function tryOpenGeminiLiveConnection(ai: any, input: { goal: string }): Promise<any | undefined> {
+  const liveModel = getLiveModel();
   try {
     // SDK shapes can vary; this dynamic probe keeps runtime compatibility.
     const liveApi = ai?.live || ai?.realtime || ai?.models?.live;
     if (!liveApi) return undefined;
     if (typeof liveApi.connect === 'function') {
       return await liveApi.connect({
-        model: LIVE_MODEL,
+        model: liveModel,
         config: {
           systemInstruction: `You are a realtime campaign copilot. Goal: ${input.goal}`,
           responseModalities: ['TEXT', 'AUDIO'],
@@ -56,6 +68,10 @@ async function tryOpenGeminiLiveConnection(ai: any, input: { goal: string }): Pr
 }
 
 export async function startRealtimeSession(input: { sessionId: string; goal: string }) {
+  const REALTIME_PROVIDER = getRealtimeProvider();
+  const LIVE_MODEL = getLiveModel();
+  const ADK_ENDPOINT = getAdkEndpoint();
+  const LIVE_STRICT = isLiveStrictMode();
   const liveSessionId = randomUUID();
   const ai = await getAI();
   let liveConnection: any | undefined;
@@ -242,6 +258,8 @@ export async function sendRealtimeTurn(
   liveSessionId: string,
   input: { message: string; screenshotBase64?: string },
 ): Promise<string> {
+  const LIVE_MODEL = getLiveModel();
+  const LIVE_STRICT = isLiveStrictMode();
   const record = liveSessions.get(liveSessionId);
   if (!record) {
     throw new Error(`Live session not found: ${liveSessionId}`);
@@ -310,6 +328,10 @@ export async function sendRealtimeTurn(
 }
 
 export function getRealtimeProviderMatrix() {
+  const REALTIME_PROVIDER = getRealtimeProvider();
+  const LIVE_MODEL = getLiveModel();
+  const ADK_ENDPOINT = getAdkEndpoint();
+  const LIVE_STRICT = isLiveStrictMode();
   return {
     activeProvider: REALTIME_PROVIDER,
     liveModel: LIVE_MODEL,
