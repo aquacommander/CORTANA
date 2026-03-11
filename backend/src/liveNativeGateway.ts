@@ -133,6 +133,15 @@ type ConnectionState = {
   suppressNextCloseError: boolean;
 };
 
+function shouldFallbackAuthError(errorText: string): boolean {
+  const normalized = errorText.toLowerCase();
+  return (
+    normalized.includes('invalid_grant') ||
+    normalized.includes('invalid_rapt') ||
+    normalized.includes('reauth related error')
+  );
+}
+
 function shouldFallbackModel(reason: string): boolean {
   const normalized = reason.toLowerCase();
   return (
@@ -227,12 +236,12 @@ export function attachLiveNativeGateway(params: NativeGatewayParams): void {
       let activeModel = params.geminiModel;
       let bridgeGeneration = 0;
 
-      const connectWithModel = (model: string): void => {
+      const connectWithModel = (model: string, useVertexMode: boolean): void => {
         activeModel = model;
         const currentGeneration = ++bridgeGeneration;
         const geminiBridge = new GeminiLiveBridge({
           apiKey: params.geminiApiKey,
-          useVertex: params.useVertex,
+          useVertex: useVertexMode,
           project: params.vertexProject,
           location: params.vertexLocation,
           model,
@@ -313,9 +322,29 @@ export function attachLiveNativeGateway(params: NativeGatewayParams): void {
                     message: `Model ${model} unavailable. Falling back to ${nextModel}.`,
                     timestamp: new Date().toISOString(),
                   });
-                  connectWithModel(nextModel);
+                  connectWithModel(nextModel, useVertexMode);
                   return;
                 }
+              }
+
+              if (shouldFallbackAuthError(reason) && useVertexMode) {
+                if (params.geminiApiKey) {
+                  sendJson(socket, {
+                    type: 'gemini_error',
+                    message:
+                      'Vertex auth expired. Falling back to API-key mode for native live session.',
+                    timestamp: new Date().toISOString(),
+                  });
+                  connectWithModel(model, false);
+                  return;
+                }
+                sendJson(socket, {
+                  type: 'gemini_error',
+                  message:
+                    'Vertex auth expired (invalid_rapt). Run: gcloud auth application-default login',
+                  timestamp: new Date().toISOString(),
+                });
+                return;
               }
 
               sendJson(socket, {
@@ -334,8 +363,29 @@ export function attachLiveNativeGateway(params: NativeGatewayParams): void {
           log('ERROR', 'gemini.native.session.connect_failed', {
             connectionId,
             model,
+            authMode: useVertexMode ? 'vertex' : 'api_key',
             error: error.message,
           });
+
+          if (shouldFallbackAuthError(error.message) && useVertexMode) {
+            if (params.geminiApiKey) {
+              sendJson(socket, {
+                type: 'gemini_error',
+                message:
+                  'Vertex auth expired. Falling back to API-key mode for native live session.',
+                timestamp: new Date().toISOString(),
+              });
+              connectWithModel(model, false);
+              return;
+            }
+            sendJson(socket, {
+              type: 'gemini_error',
+              message:
+                'Vertex auth expired (invalid_rapt). Run: gcloud auth application-default login',
+              timestamp: new Date().toISOString(),
+            });
+            return;
+          }
 
           if (fallbackModels.length > 0) {
             const nextModel = fallbackModels.shift();
@@ -345,7 +395,7 @@ export function attachLiveNativeGateway(params: NativeGatewayParams): void {
                 message: `Gemini model ${model} failed to connect. Falling back to ${nextModel}.`,
                 timestamp: new Date().toISOString(),
               });
-              connectWithModel(nextModel);
+              connectWithModel(nextModel, useVertexMode);
               return;
             }
           }
@@ -358,7 +408,7 @@ export function attachLiveNativeGateway(params: NativeGatewayParams): void {
         });
       };
 
-      connectWithModel(activeModel);
+      connectWithModel(activeModel, params.useVertex);
     }
 
     socket.on('message', async (data: RawData, isBinary) => {

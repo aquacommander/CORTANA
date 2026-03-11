@@ -290,6 +290,9 @@ const App: React.FC = () => {
   const [isNativeConnected, setIsNativeConnected] = useState<boolean>(false);
   const [nativeActiveModel, setNativeActiveModel] = useState<string>('');
   const [nativeMicAckBytes, setNativeMicAckBytes] = useState<number>(0);
+  const [nativeHealthState, setNativeHealthState] = useState<
+    'disconnected' | 'connecting' | 'ready' | 'thinking' | 'speaking' | 'interrupted' | 'failed'
+  >('disconnected');
   const [micChunksSent, setMicChunksSent] = useState<number>(0);
   const [audioBytesReceived, setAudioBytesReceived] = useState<number>(0);
   const [lastBackendAudioAckBytes, setLastBackendAudioAckBytes] = useState<number>(0);
@@ -324,6 +327,7 @@ const App: React.FC = () => {
   const liveWsRef = useRef<LiveWsClient | null>(null);
   const nativeWsRef = useRef<WebSocket | null>(null);
   const nativePlayerRef = useRef<StreamingPcmPlayer | null>(null);
+  const nativeSpeakingTimeoutRef = useRef<number | null>(null);
   const wsAudioBufferRef = useRef<{ streamId: string; mimeType: string; chunks: string[] } | null>(null);
   const wsAudioElementRef = useRef<HTMLAudioElement | null>(null);
   const wsVoiceFallbackTimerRef = useRef<number | null>(null);
@@ -405,6 +409,10 @@ const App: React.FC = () => {
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
       liveWsRef.current?.close();
       nativeWsRef.current?.close();
+      if (nativeSpeakingTimeoutRef.current) {
+        clearTimeout(nativeSpeakingTimeoutRef.current);
+        nativeSpeakingTimeoutRef.current = null;
+      }
       void nativePlayerRef.current?.destroy();
       if (intakeRecognitionRef.current) {
         try {
@@ -939,6 +947,7 @@ const App: React.FC = () => {
     if (nativeWsRef.current && nativeWsRef.current.readyState === WebSocket.OPEN) {
       return;
     }
+    setNativeHealthState('connecting');
     const socket = new WebSocket(nativeLiveWsUrl);
     socket.binaryType = 'arraybuffer';
     nativeWsRef.current = socket;
@@ -951,6 +960,7 @@ const App: React.FC = () => {
         timestamp: new Date().toISOString(),
       });
       setIsNativeConnected(true);
+      setNativeHealthState('connecting');
       setStatusMessage('Native live agent connected.');
     };
 
@@ -965,10 +975,18 @@ const App: React.FC = () => {
         if (parsed?.type === 'gemini_session_ready') {
           setNativeActiveModel(parsed.model || '');
           setIsNativeConnected(true);
+          setNativeHealthState('ready');
         } else if (parsed?.type === 'binary_stub_received') {
           setNativeMicAckBytes(parsed.byteLength || 0);
         } else if (parsed?.type === 'gemini_error') {
+          setNativeHealthState('failed');
           setStatusMessage(parsed.message || 'Native live error');
+        } else if (parsed?.type === 'model_interrupted') {
+          setNativeHealthState('interrupted');
+          if (nativeSpeakingTimeoutRef.current) {
+            clearTimeout(nativeSpeakingTimeoutRef.current);
+            nativeSpeakingTimeoutRef.current = null;
+          }
         } else if (parsed?.type === 'snapshot_received') {
           setStatusMessage(`Snapshot sent (${parsed.imageBytes || 0} bytes).`);
         }
@@ -986,15 +1004,24 @@ const App: React.FC = () => {
       const pcm = new Int16Array(aligned.buffer);
       nativePlayerRef.current?.enqueuePcm16(pcm);
       void nativePlayerRef.current?.start();
+      setNativeHealthState('speaking');
+      if (nativeSpeakingTimeoutRef.current) {
+        clearTimeout(nativeSpeakingTimeoutRef.current);
+      }
+      nativeSpeakingTimeoutRef.current = window.setTimeout(() => {
+        setNativeHealthState((prev) => (prev === 'speaking' ? 'ready' : prev));
+      }, 1200);
     };
 
     socket.onclose = () => {
       setIsNativeConnected(false);
       setNativeActiveModel('');
+      setNativeHealthState('disconnected');
       nativeWsRef.current = null;
     };
 
     socket.onerror = () => {
+      setNativeHealthState('failed');
       setStatusMessage('Native live socket error.');
     };
   };
@@ -1005,12 +1032,18 @@ const App: React.FC = () => {
     setIsNativeConnected(false);
     setNativeActiveModel('');
     setNativeMicAckBytes(0);
+    setNativeHealthState('disconnected');
+    if (nativeSpeakingTimeoutRef.current) {
+      clearTimeout(nativeSpeakingTimeoutRef.current);
+      nativeSpeakingTimeoutRef.current = null;
+    }
     nativePlayerRef.current?.stopAndFlush();
   };
 
   const sendNativeTextPrompt = (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || !nativeWsRef.current || nativeWsRef.current.readyState !== WebSocket.OPEN) return;
+    setNativeHealthState('thinking');
     sendNativeJson({
       type: 'send_text_prompt',
       requestId: crypto.randomUUID ? crypto.randomUUID() : `req-${Date.now()}`,
@@ -1944,6 +1977,9 @@ const App: React.FC = () => {
                 <p className="text-xs text-stone-500 dark:text-zinc-400">
                   Native live: {isNativeConnected ? 'Connected' : 'Disconnected'}
                   {nativeActiveModel ? ` (${nativeActiveModel})` : ''}
+                </p>
+                <p className="text-xs text-stone-500 dark:text-zinc-400">
+                  Native state: {nativeHealthState}
                 </p>
                 <p className="text-xs text-stone-500 dark:text-zinc-400">
                   Native mic uplink ack: {nativeMicAckBytes} bytes
