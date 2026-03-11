@@ -13,6 +13,7 @@ import { getRandomStyle, fileToBase64, TYPOGRAPHY_SUGGESTIONS, createGifFromVide
 import { Loader2, Paintbrush, Clapperboard, Play, ExternalLink, Type, Sparkles, Image as ImageIcon, X, Upload, Download, FileType, Wand2, Volume2, VolumeX, ChevronLeft, ChevronRight, ArrowLeft, Video as VideoIcon, Key, Info, ShieldCheck } from 'lucide-react';
 import { LiveIntent, Session, WorkflowStage } from './shared/contracts';
 import { WORKFLOW_STAGES } from './shared/workflow';
+import { NativeLiveAgentPanel } from './components/liveNative/NativeLiveAgentPanel';
 
 interface Video {
   id: string;
@@ -1838,6 +1839,7 @@ const App: React.FC = () => {
                 )}
               </div>
             </div>
+            <NativeLiveAgentPanel />
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <input
                 type="text"
