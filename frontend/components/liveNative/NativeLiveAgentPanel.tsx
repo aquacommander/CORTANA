@@ -51,6 +51,9 @@ export function NativeLiveAgentPanel() {
   const [status, setStatus] = useState<AgentUiState>('disconnected');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [lastAgentText, setLastAgentText] = useState<string>('');
+  const [micAckCount, setMicAckCount] = useState(0);
+  const [lastMicAckBytes, setLastMicAckBytes] = useState<number | null>(null);
   const [promptText, setPromptText] = useState('Give me one fun fact about space.');
   const [snapshotQuestion, setSnapshotQuestion] = useState('What do you see in this image?');
   const [isMicEnabled, setIsMicEnabled] = useState(false);
@@ -195,6 +198,13 @@ export function NativeLiveAgentPanel() {
             setActiveModel(parsed.model);
             setStatus('listening');
           }
+          if (parsed.type === 'gemini_text') {
+            setLastAgentText(parsed.text);
+          }
+          if (parsed.type === 'binary_stub_received') {
+            setMicAckCount((current) => current + 1);
+            setLastMicAckBytes(parsed.byteLength);
+          }
           if (parsed.type === 'gemini_turn_complete' || parsed.type === 'model_interrupted') {
             canBargeInRef.current = false;
             consecutiveSpeechFramesRef.current = 0;
@@ -292,6 +302,15 @@ export function NativeLiveAgentPanel() {
       <p className="text-xs text-stone-500 dark:text-zinc-400">
         Status: <strong>{status}</strong> | Model: <strong>{activeModel ?? 'not ready'}</strong>
       </p>
+      <p className="text-xs text-stone-500 dark:text-zinc-400">
+        Mic uplink: <strong>{micAckCount > 0 ? 'active' : 'waiting'}</strong>
+        {lastMicAckBytes !== null ? ` (${lastMicAckBytes} bytes/frame ack)` : ''}
+      </p>
+      {lastAgentText ? (
+        <p className="text-xs text-stone-600 dark:text-zinc-300">
+          Last agent text: <span className="font-semibold">{lastAgentText}</span>
+        </p>
+      ) : null}
       <div className="flex flex-wrap gap-2">
         <button type="button" onClick={connect} className="px-3 py-1.5 rounded-lg border text-xs font-semibold">
           Connect
