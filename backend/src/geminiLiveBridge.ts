@@ -62,7 +62,8 @@ export class GeminiLiveBridge {
     const session = (await this.ai.live.connect({
       model: this.model,
       config: {
-        responseModalities: [Modality.AUDIO, Modality.TEXT],
+        // Native live audio models reject multiple setup response modalities.
+        responseModalities: [Modality.AUDIO],
         systemInstruction: this.systemInstruction,
       },
       callbacks: {
